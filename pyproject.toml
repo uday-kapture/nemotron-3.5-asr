@@ -1,0 +1,42 @@
+[project]
+name = "hinglish-asr"
+version = "0.1.0"
+description = "Data prep and baseline evaluation for fine-tuning nvidia/nemotron-3.5-asr-streaming-0.6b on Hinglish telephony audio"
+readme = "README.md"
+# 3.12: audioop (the production 8 kHz resampler) is removed in 3.13, and
+# NeMo Speech 3.x is tested on 3.12+.
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "huggingface-hub>=0.30",
+    "jiwer>=4.0.0",
+    "numpy>=1.26",
+    "pyarrow>=15",
+    "pyyaml>=6.0",
+    "soundfile>=0.12",
+]
+
+[project.optional-dependencies]
+# Only the baseline (and later training) needs the model stack. Data prep and
+# scoring run without torch.
+nemo = [
+    "nemo-toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech.git@v3.0.0",
+]
+mlflow = [
+    "mlflow>=3.11.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.9,<0.12"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    # tests compare against audioop directly; production code already silences it
+    "ignore:'audioop' is deprecated:DeprecationWarning",
+]
