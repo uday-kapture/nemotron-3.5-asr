@@ -24,6 +24,10 @@ nemo = [
 mlflow = [
     "mlflow>=3.11.1",
 ]
+# LaBSE semdist in the benchmark (lenient WER needs nothing extra).
+semantic = [
+    "sentence-transformers>=3.0",
+]
 
 [dependency-groups]
 dev = [

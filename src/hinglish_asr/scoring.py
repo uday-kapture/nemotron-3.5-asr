@@ -114,3 +114,80 @@ def score_corpus(
         out[f"{script}_errors"] = errors[script]
         out[f"wer_{script}"] = errors[script] / ref_counts[script] if ref_counts[script] else None
     return out
+
+
+def utterance_errors(
+    references: list[str],
+    hypotheses: list[str],
+    equivalents: dict[str, str] | None = None,
+) -> list[tuple[int, int] | None]:
+    """(word errors, reference words) per utterance, same normalization as
+    `score_corpus`; None where the normalized reference is empty (skipped there too)."""
+    if len(references) != len(hypotheses):
+        raise ValueError(f"{len(references)} references but {len(hypotheses)} hypotheses")
+    out: list[tuple[int, int] | None] = []
+    keep, refs, hyps = [], [], []
+    for i, (r, h) in enumerate(zip(references, hypotheses)):
+        r = normalize_for_scoring(r, equivalents)
+        out.append(None)
+        if r:
+            keep.append(i)
+            refs.append(r)
+            hyps.append(normalize_for_scoring(h, equivalents))
+    if not refs:
+        return out
+    words = jiwer.process_words(refs, hyps)
+    for i, ref_toks, chunks in zip(keep, words.references, words.alignments):
+        errors = 0
+        for c in chunks:
+            if c.type in ("substitute", "delete"):
+                errors += c.ref_end_idx - c.ref_start_idx
+            elif c.type == "insert":
+                errors += c.hyp_end_idx - c.hyp_start_idx
+        out[i] = (errors, len(ref_toks))
+    return out
+
+
+def error_rate(pairs) -> float | None:
+    pairs = [p for p in pairs if p is not None]
+    words = sum(n for _, n in pairs)
+    return sum(e for e, _ in pairs) / words if words else None
+
+
+def paired_bootstrap(
+    groups: list[str],
+    a: list[tuple[int, int] | None],
+    b: list[tuple[int, int] | None],
+    resamples: int = 1000,
+    seed: int = 0,
+) -> dict:
+    """Error rate of `b` minus `a`, with a 95% interval from resampling whole groups.
+
+    A customer's utterances are not independent (same voice, line, topics), so
+    resampling utterances one by one would make the interval too narrow.
+    """
+    import numpy as np
+
+    totals: dict[str, list[int]] = {}
+    for g, x, y in zip(groups, a, b):
+        if x is None or y is None:
+            continue
+        t = totals.setdefault(g, [0, 0, 0, 0])
+        t[0] += x[0]
+        t[1] += x[1]
+        t[2] += y[0]
+        t[3] += y[1]
+    if not totals:
+        return {"delta": None, "ci95": None, "groups": 0, "resamples": resamples}
+    arr = np.array(list(totals.values()), dtype=float)
+    n = len(arr)
+    rng = np.random.default_rng(seed)
+    deltas = []
+    for start in range(0, resamples, 100):  # chunks keep the count matrix small
+        counts = rng.multinomial(n, np.full(n, 1 / n), size=min(100, resamples - start))
+        s = counts @ arr
+        deltas.append(s[:, 2] / s[:, 3] - s[:, 0] / s[:, 1])
+    deltas = np.concatenate(deltas)
+    lo, hi = np.percentile(deltas, [2.5, 97.5])
+    point = arr[:, 2].sum() / arr[:, 3].sum() - arr[:, 0].sum() / arr[:, 1].sum()
+    return {"delta": float(point), "ci95": [float(lo), float(hi)], "groups": n, "resamples": resamples}

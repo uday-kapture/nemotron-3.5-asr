@@ -1,6 +1,6 @@
 # nemotron-3.5-fine-tune
 
-Data prep and baseline evaluation for fine-tuning
+Data prep, baseline, fine-tuning and benchmarking for
 [`nvidia/nemotron-3.5-asr-streaming-0.6b`](https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b)
 on Hinglish (Hindi in Devanagari, English in Latin, mixed in one utterance).
 Background and sources: [docs/research/nemotron-3.5-asr-hinglish-finetuning.md](docs/research/nemotron-3.5-asr-hinglish-finetuning.md).
@@ -110,6 +110,158 @@ uv run python -m hinglish_asr.input_cfg \
 once at v3.0.0) with FLAC shards. Use a shard count divisible by the GPU
 count. `input_cfg.py` writes the Lhotse blend for `model.train_ds.input_cfg`:
 one entry per source with its weight and `prompt_mode` tag.
+
+## Calls pipeline: bolAIndia → fine-tune → benchmark
+
+Everything below runs on the GPU box. Training text is Kapture call chunks
+from the gated `kapturecx/bolAIndia` whose transcript came from Deepgram
+nova-3, the only vendor that writes English words in Latin script. The model
+is trained and judged at the deployment setting: 80 ms lookahead
+(`att_context_size [56,0]`) and the `auto` prompt.
+
+```bash
+uv sync --extra nemo --extra mlflow --extra semantic
+export MLFLOW_TRACKING_URI=...               # required; see "MLflow" below
+scripts/fetch_inputs.sh                      # checks dataset access, fetches models/base/*.nemo
+
+# 1. plan: which files hold Deepgram rows, from the dataset's stats only
+uv run python -m hinglish_asr.plan --config configs/data/calls_deepgram.yaml --out /data/calls/plan.json
+
+# 2. convert: download each file whole, keep Deepgram rows, write tar shards + held-out manifests
+HF_XET_HIGH_PERFORMANCE=1 uv run python -m hinglish_asr.convert \
+    --plan /data/calls/plan.json --out /data/calls --limit-files 3      # look at report.json first
+HF_XET_HIGH_PERFORMANCE=1 uv run python -m hinglish_asr.convert --plan /data/calls/plan.json --out /data/calls
+#   short on disk: add --upload-to kapturecx/<private-shard-repo> to stream the training tars instead
+
+# 3. blend
+uv run python -m hinglish_asr.input_cfg --entry /data/calls/train:1.0:auto --out configs/input_cfg.yaml
+
+# 4. pilot: batch size, speed, max_steps   5. LR sweep   6. full run
+uv run python -m hinglish_asr.train pilot --arm cosine --batch-durations 300 400 500 600 --passes 3
+uv run python -m hinglish_asr.train sweep --arms noam cosine --set model.train_ds.batch_duration=500
+uv run python -m hinglish_asr.train run --arm cosine --name calls-v1 \
+    --set model.train_ds.batch_duration=500 --set trainer.max_steps=<from runs/pilot.json>
+
+# 7. benchmark the checkpoints: choose on val, report on test
+uv run python -m hinglish_asr.benchmark --run runs/calls-v1 \
+    --val /data/calls/val_manifest.jsonl --test /data/calls/test_manifest.jsonl
+```
+
+**Data** (`bolai.py`, `plan.py`, `convert.py`, `configs/data/calls_deepgram.yaml`).
+At the pinned revision, 2,170 files hold 2,958 Deepgram hours; each file is
+~25% Deepgram, so taking all of it downloads 529 GB. About a fifth of the
+Deepgram rows are empty "unintelligible" chunks and are dropped, leaving
+~2,300 h. The audio is already 16 kHz mono FLAC chunks, so the converter
+copies the bytes into `train/audio_<k>.tar` (about 105 GB in total) without
+resampling. Rows are split by customer: the phone hash of the called party
+on outbound calls, the caller on inbound ones. 1% of customers each go to
+val and test, and `val_small_manifest.jsonl` (3 h) is the validation set used
+during training. Reruns skip finished files (`done/<k>.json`). `report.json`
+gives hours per split, drops by reason, the Latin-word share (~23% for
+Deepgram), concentration by client, and Deepgram confidence quantiles. Use
+the quantiles to set `min_confidence` before the full conversion.
+
+**Streaming the training shards** (`convert --upload-to REPO`).
+- **During conversion:** each finished tar and its manifest go to a private
+  HF dataset repo in batched commits (25 shards each), and the local tar is
+  deleted.
+- **Peak local disk:** one batch of tars, plus the parquet files in flight
+  (about 2 GB at `--workers 8`), plus manifests and val/test (about 3 GB).
+- **During training:** `input_cfg` sees `train/remote.json` and writes the tar
+  paths as `pipe:curl … https://huggingface.co/datasets/REPO/resolve/<commit>/…`,
+  pinned to the commit `convert` recorded. NeMo reads each shard as a stream.
+  Training needs about 13 MB/s at 1,000× realtime, or about 105 GB per pass.
+- **Auth:** curl reads the token from a header file (mode 600, written from
+  your HF login), so the token is never in the YAML or the process list. Use a
+  token with write access to the shard repo for convert, and read access for
+  training.
+- **Requirements:** curl ≥ 7.71, for `--retry-all-errors`. A failed read makes
+  NeMo skip the whole shard with only a warning.
+- **Safeguards:** the converter refuses a public repo and the source dataset.
+  The repo holds call audio and transcripts.
+
+**Training** (`train.py`, `configs/train.yaml`) follows NeMo's
+`speech_to_text_finetune.py`. It adds:
+- validation at 80 ms with the auto prompt and language tags stripped;
+- lookahead sampling weighted to 80 ms (`att_context_probs`; NeMo's default
+  is uniform over the four trained lookaheads);
+- validation loss, plus the top-5 and last checkpoints by `val_wer` (one
+  .nemo at the end, not one per checkpoint);
+- MLflow logging and a throughput log.
+
+The loss is the .nemo's: RNNT (`warprnnt_numba`) with FastEmit λ=5e-3, no
+auxiliary CTC. The targets carry no `<xx-XX>` tags, so the fine-tuned model
+stops emitting them; scoring strips them either way. `pilot` runs ~300 steps
+per `batch_duration` in separate processes. It picks the fastest one whose
+peak memory stays under 85% of the GPU, and turns the measured audio seconds
+per step into `max_steps` for N passes. `sweep` runs the `noam` (peak 3e-4)
+and `cosine` (1e-4) arms for equal steps and compares their best `val_wer`.
+Rerunning the same `--name` resumes from its last checkpoint.
+
+**Checkpoints on the Hub** (`checkpoint_hub_repo` in `configs/train.yaml`).
+Set it to a private HF model repo and the top-k checkpoints are never
+written locally. Each goes straight to `runs/<name>/` in the repo as weights
+only, about 2.4 GB instead of 8 GB with optimizer state, and the same commit
+deletes whatever falls out of the top 5. Only the `-last` checkpoint (about
+8 GB, with optimizer state) stays on disk, for resuming. NeMo's end-of-run
+`.nemo` is switched off, because it reloads the best checkpoint from disk;
+the benchmark writes `winner.nemo`. The benchmark reads `checkpoint_hub.json`
+in the run directory. It downloads each candidate once, loads it, deletes it,
+and builds the top-k average while they load. An upload happens at each
+validation (every 1,000 steps) and blocks training for as long as 2.4 GB
+takes to upload.
+
+**Benchmark** (`benchmark.py`, `semantic.py`).
+- **Candidates:** the base model, the top-k checkpoints, the last checkpoint,
+  and the average of the top-k weights. Each is decoded on the full val split
+  at 80 ms with `auto`.
+- **Choosing:** lowest val WER wins. Test is decoded only for the winner and
+  the base model.
+- **Metrics:**
+  - WER/CER and WER by script;
+  - **lenient WER**: cross-script spellings (`order`/`ऑर्डर`), Devanagari
+    variants (`है`/`हैं`), number words vs digits and split words count as
+    matches;
+  - **semdist** (LaBSE);
+  - breakdowns by language, channel, duration and client;
+  - the change against the base model, with a 95% interval from resampling
+    customers.
+- **Checks:** the gain's interval is below zero; true streaming matches
+  offline decoding on 500 val utterances; and lenient WER picks the same
+  winner.
+- **Outputs:** `runs/<name>/benchmark/benchmark.md` and `winner.nemo`.
+  Predictions and `cross_script_pairs.json` (the cross-script matches to
+  audit) hold transcripts and stay on the box.
+
+Both eval splits are scored against Deepgram's transcripts, so every call WER
+here measures agreement with Deepgram, not accuracy.
+
+**MLflow** (`tracking.py`). Every stage refuses to run without
+`MLFLOW_TRACKING_URI`, because the fallback would be a local store nobody
+sees. Training logs through Lightning's MLFlowLogger, as NeMo's exp_manager
+hookup breaks on `run_name`. The benchmark adds one nested run per
+candidate under the training run, metrics only. Weights are uploaded only
+with `benchmark --log-model`. Basic auth wins if both
+`MLFLOW_TRACKING_USERNAME` and `MLFLOW_TRACKING_TOKEN` are set; set one.
+
+**Google Chat updates** (`notify.py`). In a Chat space, add an incoming
+webhook (Apps & integrations → Webhooks) and export its URL as
+`GCHAT_WEBHOOK_URL` on the training box. The URL lets anyone post into the
+space, so keep it out of configs and git. Without it nothing is sent.
+- **Per run**, in its own thread: start (or resume step), progress every
+  `notify.every_n_steps` steps (loss, lr, s/step, × realtime, ETA), each
+  epoch's `val_wer` and `val_loss` against the best so far, a non-finite loss,
+  any error with the end of its traceback, and the finish with the best
+  `val_wer`.
+- **Drivers:** `sweep` posts each arm's best `val_wer` and the winner;
+  `pilot` posts its table and chosen batch size. Pilot runs themselves stay
+  quiet, since an out-of-memory run is how the pilot finds the limit.
+- **What it can't report:** a run killed by a signal under `pilot`/`sweep`
+  is reported by the parent, but a `train run` killed outright (`kill -9`,
+  the host's OOM killer, a lost machine) sends nothing. Progress messages
+  stopping is the sign.
+- Messages carry metrics and step counts, never transcripts. A failed post
+  is printed to stderr and training continues.
 
 ## Things to know
 

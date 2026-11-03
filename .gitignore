@@ -5,3 +5,6 @@ __pycache__/
 data/
 reports/
 mlruns/
+models/
+runs/
+mlflow.db

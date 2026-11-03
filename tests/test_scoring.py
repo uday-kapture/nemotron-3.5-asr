@@ -2,7 +2,14 @@ import json
 
 import pytest
 
-from hinglish_asr.scoring import load_equivalents, normalize_for_scoring, score_corpus
+from hinglish_asr.scoring import (
+    error_rate,
+    load_equivalents,
+    normalize_for_scoring,
+    paired_bootstrap,
+    score_corpus,
+    utterance_errors,
+)
 
 
 def test_scoring_normalizer_drops_punctuation_and_case_but_keeps_matras():
@@ -69,3 +76,28 @@ def test_pairs_with_empty_normalized_reference_are_skipped_and_counted():
     assert s["skipped_empty_refs"] == 1
     assert s["utterances"] == 1
     assert s["wer"] == pytest.approx(0.0)
+
+
+def test_utterance_errors_add_up_to_corpus_wer():
+    refs = ["मुझे meeting के लिए late", "", "ठीक है"]
+    hyps = ["मुझे मीटिंग के लिए", "x", "ठीक है जी"]
+    per = utterance_errors(refs, hyps)
+    assert per == [(2, 5), None, (1, 2)]
+    assert error_rate(per) == pytest.approx(score_corpus(refs, hyps)["wer"])
+
+
+def test_paired_bootstrap_interval_brackets_a_clear_gain():
+    groups = [f"g{i // 3}" for i in range(300)]
+    a = [(2, 10)] * 300
+    b = [(1, 10)] * 300
+    out = paired_bootstrap(groups, a, b, resamples=200)
+    assert out["delta"] == pytest.approx(-0.1)
+    assert out["ci95"][1] < 0 and out["groups"] == 100
+
+
+def test_paired_bootstrap_interval_covers_zero_for_noise():
+    groups = [f"g{i}" for i in range(200)]
+    a = [(i % 3, 10) for i in range(200)]
+    b = [((i + 1) % 3, 10) for i in range(200)]
+    lo, hi = paired_bootstrap(groups, a, b, resamples=500)["ci95"]
+    assert lo < 0 < hi

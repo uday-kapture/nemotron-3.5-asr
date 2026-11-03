@@ -1,3 +1,5 @@
+import json
+
 import pytest
 import yaml
 
@@ -62,3 +64,46 @@ def test_cli_writes_yaml_list(tmp_path):
         ("nemo_tarred", 0.8, "auto"),
         ("nemo", 0.2, "langID"),
     ]
+
+
+def _remote(d, n, missing=()):
+    d.mkdir(parents=True)
+    (d / "sharded_manifests").mkdir()
+    for i in range(n):
+        (d / "sharded_manifests" / f"manifest_{i}.json").write_text("")
+    (d / "remote.json").write_text(json.dumps({
+        "repo": "org/shards", "revision": "abc", "prefix": "train", "shards": n,
+        "missing_count": len(missing), "missing": list(missing),
+    }))
+    return d
+
+
+def test_remote_shards_stream_with_local_manifests(tmp_path):
+    d = _remote(tmp_path / "train", 3)
+    e = build_entry(str(d), 1.0, "auto")
+    assert e["manifest_filepath"] == f"{d}/sharded_manifests/manifest__OP_0..2_CL_.json"
+    assert e["tarred_audio_filepath"] == (
+        "pipe:curl -sfL --retry 10 --retry-delay 5 --retry-all-errors "
+        "https://huggingface.co/datasets/org/shards/resolve/abc/train/audio__OP_0..2_CL_.tar"
+    )
+
+
+def test_remote_shards_must_all_be_uploaded(tmp_path):
+    with pytest.raises(InputCfgError, match="not uploaded"):
+        build_entry(str(_remote(tmp_path / "train", 3, missing=[2])), 1.0)
+
+
+def test_header_path_must_survive_nemo_brace_rewriting(tmp_path):
+    with pytest.raises(InputCfgError, match="contains"):
+        build_entry(str(_remote(tmp_path / "train", 1)), 1.0, auth_header="/tmp/hdr(1)")
+
+
+def test_cli_writes_a_private_header_file_for_remote_entries(tmp_path, monkeypatch):
+    monkeypatch.setattr("huggingface_hub.get_token", lambda: "hf_secret")
+    d = _remote(tmp_path / "train", 2)
+    header = tmp_path / "hdr" / "auth"
+    main(["--entry", f"{d}:1.0:auto", "--out", str(tmp_path / "cfg.yaml"), "--auth-header", str(header)])
+    assert header.read_text() == "Authorization: Bearer hf_secret\n"
+    assert header.stat().st_mode & 0o777 == 0o600
+    cfg = (tmp_path / "cfg.yaml").read_text()
+    assert f"-H @{header}" in cfg and "hf_secret" not in cfg

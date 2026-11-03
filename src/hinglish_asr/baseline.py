@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from collections import Counter
@@ -201,21 +200,18 @@ def render_markdown(rows: list[dict], meta: dict) -> str:
 def log_to_mlflow(experiment: str, run_name: str | None, meta: dict, rows: list[dict], out_dir: Path) -> None:
     import mlflow
 
-    if os.environ.get("MLFLOW_TRACKING_USERNAME") and os.environ.get("MLFLOW_TRACKING_TOKEN"):
-        # MLflow sends Basic auth when username+password are set and never the token.
-        print("warning: both MLFLOW_TRACKING_USERNAME and MLFLOW_TRACKING_TOKEN are set; "
-              "MLflow will use Basic auth only", file=sys.stderr)
-    mlflow.set_experiment(experiment)
-    with mlflow.start_run(run_name=run_name):
-        mlflow.set_tag("stage", "baseline")
-        mlflow.log_params({k: meta[k] for k in ("model", "manifest", "utterances", "equivalents")})
+    from . import tracking
+
+    with tracking.run(experiment, run_name, stage="baseline"):
+        tracking.log_params({k: meta[k] for k in ("model", "manifest", "utterances", "equivalents")})
         mlflow.log_param("audio_hours", round(meta["audio_hours"], 3))
         for r in rows:
             key = f"{r['mode']}/{r['target_lang']}/{r['latency_ms']}ms"
-            for metric in ("wer", "cer", "wer_devanagari", "wer_latin", "tag_rate", "latin_word_share", "rtfx"):
-                if r.get(metric) is not None:
-                    mlflow.log_metric(f"{metric}/{key}", r[metric])
-        mlflow.log_artifacts(str(out_dir))
+            metrics = ("wer", "cer", "wer_devanagari", "wer_latin", "tag_rate", "latin_word_share", "rtfx")
+            tracking.log_metrics({f"{m}/{key}": r.get(m) for m in metrics})
+        # summary.* only: predictions/ holds transcripts, which stay on the box.
+        mlflow.log_artifact(str(out_dir / "summary.json"))
+        mlflow.log_artifact(str(out_dir / "summary.md"))
 
 
 def main(argv: list[str] | None = None) -> list[dict]:

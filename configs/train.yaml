@@ -1,0 +1,102 @@
+# Fine-tuning recipe for `hinglish_asr.train`. `model` sections override the
+# .nemo's own config (loss, encoder, joint and decoding otherwise come from the
+# .nemo, as in NeMo's speech_to_text_finetune.py). `arms` are the LR-sweep
+# variants, merged over everything else with --arm. Any value can be changed
+# per run with --set a.b.c=value.
+
+base_model: models/base/nemotron-3.5-asr-streaming-0.6b.nemo
+run_root: runs
+mlflow:
+  experiment: hinglish-asr-calls
+
+data:
+  input_cfg: configs/input_cfg.yaml                   # hinglish_asr.input_cfg --entry /data/calls/train:1.0:auto
+  val_manifest: /data/calls/val_small_manifest.jsonl  # 3 h, customer-disjoint from train
+  report: /data/calls/report.json                     # convert's report; `pilot` reads train hours from it
+
+model:
+  att_context_size: [56, 0]      # deployment lookahead (80 ms): validation and checkpoint choice
+  # Lookahead sampled per training batch. NeMo samples the trained lookaheads
+  # uniformly, which gives 80 ms a quarter of the steps; the others stay in
+  # the mix as regularization.
+  att_context_probs: {"56,0": 0.55, "56,3": 0.15, "56,6": 0.15, "56,13": 0.15}
+  compute_eval_loss: true        # val_loss next to val_wer; overfitting to pseudo-labels shows there first
+  fused_batch_size: null         # joint+loss sub-batch; null keeps the .nemo's. A speed knob for the pilot.
+  spec_augment:
+    _target_: nemo.collections.asr.modules.SpectrogramAugmentation
+    freq_masks: 2
+    time_masks: 10
+    freq_width: 27
+    time_width: 0.05
+  train_ds:
+    use_lhotse: true
+    batch_duration: 400          # seconds of audio per batch; `pilot` picks it
+    quadratic_duration: 15
+    use_bucketing: true
+    num_buckets: 30
+    bucket_buffer_size: 10000
+    shuffle_buffer_size: 10000
+    shuffle: true
+    max_duration: 20.0
+    min_duration: 0.1
+    num_workers: 8
+    pin_memory: true
+    default_prompt_mode: auto    # input_cfg tags every source auto too
+  validation_ds:
+    use_lhotse: true
+    batch_size: 32
+    num_workers: 4
+    default_prompt_mode: auto    # NVIDIA's config leaves this unset (random auto/langID)
+  optim:
+    name: adamw
+    betas: [0.9, 0.98]
+    weight_decay: 1.0e-3
+
+trainer:
+  devices: 1
+  accelerator: gpu
+  precision: bf16-mixed
+  max_steps: 4000                # sweep length; the full run sets it from the pilot
+  max_epochs: -1
+  # Lhotse batches have no epoch length: an "epoch" is limit_train_batches
+  # steps, validated and checkpointed at its end.
+  limit_train_batches: 1000
+  val_check_interval: 1.0
+  use_distributed_sampler: false
+  gradient_clip_val: 0.5
+  accumulate_grad_batches: 1
+  log_every_n_steps: 50
+  num_sanity_val_steps: 2
+
+# Google Chat updates, sent when GCHAT_WEBHOOK_URL holds a space's incoming
+# webhook URL (a secret: keep it out of this file). Each run posts into its
+# own thread: start, progress, each epoch's validation, errors, finish.
+notify:
+  every_n_steps: 500             # progress message; 0 = epochs and errors only
+
+# Private HF model repo for the top-k checkpoints (weights only, ~2.4 GB each,
+# under runs/<name>/). Set it on a box short on disk: nothing but the -last
+# checkpoint (~8 GB, for resuming) is then kept locally. null = all local.
+checkpoint_hub_repo: null
+
+checkpoint:
+  monitor: val_wer
+  mode: min
+  save_top_k: 5
+  save_last: true
+  filename: "{step}-{val_wer:.4f}"
+  always_save_nemo: false        # a .nemo per checkpoint is 2.4 GB of duplicates
+  save_best_model: true          # at the end, the best weights go into one .nemo
+  save_nemo_on_train_end: true
+
+arms:
+  noam:
+    model:
+      optim:
+        peak_lr: 3.0e-4          # lr is derived: peak * sqrt(d_model) * sqrt(warmup_steps)
+        sched: {name: NoamAnnealing, d_model: 1024, warmup_steps: 1000, min_lr: 1.0e-6}
+  cosine:
+    model:
+      optim:
+        lr: 1.0e-4
+        sched: {name: CosineAnnealing, warmup_ratio: 0.02, min_lr: 1.0e-6}
