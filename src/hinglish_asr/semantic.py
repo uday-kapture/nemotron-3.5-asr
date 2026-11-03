@@ -14,7 +14,9 @@ lenient WER   WER from an alignment that treats these pairs as matches:
               - spacing: one word vs the same word split in two
                 (`मिडकैप` / `मिड कैप`).
               Errors are divided by the reference's normalized word count, as
-              for WER. Every accepted match is counted by rule,
+              for WER. A number run that does not match costs as many errors
+              as its longer side has words, so a wrong or missing phone number
+              costs what it costs in plain WER. Every accepted match is counted by rule,
               and cross-script pairs are listed so the rules can be audited.
               The rules come from general Hinglish patterns; do not tune them
               on the test split.
@@ -172,16 +174,17 @@ _MULT_KEY = {dev_fold(k): v for k, v in _MULTIPLIERS.items()}
 _MOD_KEY = {dev_fold(k): v for k, v in _MODIFIERS.items()}
 
 
-def _number_token(tok: str) -> tuple[str, float] | None:
+def _number_token(tok: str) -> tuple[str, float, str | None] | None:
+    """(kind, value, digits): digits is the token itself for a digit string, so leading zeros survive."""
     if tok.isdigit():
-        return ("num", float(int(tok)))
+        return ("num", float(int(tok)), tok)
     key = dev_fold(tok)
     if key in _NUM_KEY:
-        return ("num", _NUM_KEY[key])
+        return ("num", _NUM_KEY[key], None)
     if key in _MULT_KEY:
-        return ("mult", float(_MULT_KEY[key]))
+        return ("mult", float(_MULT_KEY[key]), None)
     if key in _MOD_KEY:
-        return ("mod", _MOD_KEY[key])
+        return ("mod", _MOD_KEY[key], None)
     return None
 
 
@@ -189,58 +192,79 @@ def _fmt(x: float) -> str:
     return str(int(x)) if x == int(x) else str(x)
 
 
-def _run_value(run: list[tuple[str, float]]) -> str:
+def _run_value(run: list[tuple[str, float, str | None]]) -> str:
     """One canonical string for a run of number tokens.
 
     Multipliers combine (दो लाख पचास हज़ार = 250000); English tens take a unit
-    (twenty five = 25); other adjacent numbers are read digit by digit, as in
-    phone numbers (नौ आठ सात = 987, and "9 8 7" too).
+    (twenty five = 25); other adjacent number words are read digit by digit, as
+    in phone numbers (शून्य नौ आठ = 098). Adjacent digit strings join as text:
+    scoring turns "1,50,000" into "1 50 000" and "0987" keeps its zero.
     """
     pieces: list[str] = []
-    total, cur, mod = 0.0, None, 0.0
-    for kind, val in run:
+    total, cur, text, mod = 0.0, None, None, 0.0
+
+    def piece() -> str:
+        return text if text is not None and not total else _fmt(total + (cur or 0.0))
+
+    for kind, val, digits in run:
         if kind == "mod":
             mod = val
         elif kind == "num":
-            val += mod
-            mod = 0.0
+            if digits is not None and text is not None and not total:
+                text += digits
+                cur = float(text)
+                continue
+            if mod:
+                val, digits, mod = val + mod, None, 0.0
             if cur is None:
-                cur = val
-            elif 20 <= cur < 100 and cur % 10 == 0 and val < 10:
+                cur, text = val, digits
+            elif digits is None and text is None and 20 <= cur < 100 and cur % 10 == 0 and val < 10:
                 cur += val
             else:
-                pieces.append(_fmt(total + cur))
-                total, cur = 0.0, val
+                pieces.append(piece())
+                total, cur, text = 0.0, val, digits
         else:  # multiplier
             base = cur if cur is not None else 1.0 + mod
             mod = 0.0
             total += base * val
-            cur = None
+            cur, text = None, None
     if cur is not None or total:
-        pieces.append(_fmt(total + (cur or 0.0)))
+        pieces.append(piece())
     return "".join(pieces) or "0"
 
 
 def canonical_tokens(tokens: list[str]) -> list[tuple[str, str]]:
-    """(canonical, surface) pairs; a run of number words/digits becomes one token."""
+    """(canonical, surface) pairs; a run of number words/digits becomes one token.
+
+    A switch between digits and number words starts a new run: "1,000 दो"
+    (give 1,000) is 1000 and 2, not 10002.
+    """
     out: list[tuple[str, str]] = []
-    run: list[tuple[str, float]] = []
+    run: list[tuple[str, float, str | None]] = []
     surface: list[str] = []
+    last_digits: bool | None = None
 
     def flush():
+        nonlocal last_digits
         if run:
             out.append(("#" + _run_value(run), " ".join(surface)))
             run.clear()
             surface.clear()
+        last_digits = None
 
     for tok in tokens:
         num = _number_token(tok)
         if num is None:
             flush()
             out.append((tok, tok))
-        else:
-            run.append(num)
-            surface.append(tok)
+            continue
+        if num[0] == "num":
+            is_digits = num[2] is not None
+            if last_digits is not None and is_digits != last_digits:
+                flush()
+            last_digits = is_digits
+        run.append(num)
+        surface.append(tok)
     flush()
     return out
 
@@ -266,8 +290,17 @@ def _joined_equal(a: str, b: str) -> bool:
     return a == b or (script_of(a) == script_of(b) == "devanagari" and dev_fold(a) == dev_fold(b))
 
 
+def _words(tok: tuple[str, str]) -> int:
+    """Words a token was written with: a number run counts each of its words."""
+    return len(tok[1].split()) if tok[0].startswith("#") else 1
+
+
 def lenient_align(ref: list[tuple[str, str]], hyp: list[tuple[str, str]]) -> tuple[int, Counter, list[tuple[str, str]]]:
-    """Minimum edit cost with equivalent pairs free; also which rules matched."""
+    """Minimum edit cost with equivalent pairs free; also which rules matched.
+
+    Edits cost the words they touch (`_words`), the units the error rate is
+    divided by: substituting a number run costs its longer side.
+    """
     n, m = len(ref), len(hyp)
     inf = float("inf")
     cost = [[inf] * (m + 1) for _ in range(n + 1)]
@@ -280,12 +313,12 @@ def lenient_align(ref: list[tuple[str, str]], hyp: list[tuple[str, str]]) -> tup
                 continue
             steps = []
             if i < n:
-                steps.append((i + 1, j, 1, None))  # deletion
+                steps.append((i + 1, j, _words(ref[i]), None))  # deletion
             if j < m:
-                steps.append((i, j + 1, 1, None))  # insertion
+                steps.append((i, j + 1, _words(hyp[j]), None))  # insertion
             if i < n and j < m:
                 rule = match_rule(ref[i], hyp[j])
-                steps.append((i + 1, j + 1, 0 if rule else 1, rule))
+                steps.append((i + 1, j + 1, 0 if rule else max(_words(ref[i]), _words(hyp[j])), rule))
             if i < n and j + 1 < m and _joined_equal(ref[i][0], hyp[j][0] + hyp[j + 1][0]):
                 steps.append((i + 1, j + 2, 0, "spacing"))
             if i + 1 < n and j < m and _joined_equal(ref[i][0] + ref[i + 1][0], hyp[j][0]):
@@ -322,7 +355,13 @@ def lenient_scores(
             per.append(None)
             continue
         ht = normalize_for_scoring(h, equivalents).split()
-        errors, used, matched = lenient_align(canonical_tokens(rt), canonical_tokens(ht))
+        # Number words are ambiguous (दो is "two" and "give"): reading them as
+        # numbers can cost more than not, and lenient WER must not exceed plain WER.
+        errors, used, matched = min(
+            lenient_align(canonical_tokens(rt), canonical_tokens(ht)),
+            lenient_align([(t, t) for t in rt], [(t, t) for t in ht]),
+            key=lambda a: a[0],
+        )
         per.append((errors, len(rt)))
         rules.update(used)
         pairs.update(matched)

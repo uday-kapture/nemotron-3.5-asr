@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -26,6 +27,7 @@ from pathlib import Path
 
 PARENT_TAG = "mlflow.parentRunId"
 MAX_PARAM_CHARS = 500
+PARAM_NAME_REFUSED = re.compile(r"[^A-Za-z0-9_\-. :/]")
 
 
 class TrackingError(RuntimeError):
@@ -45,10 +47,14 @@ def tracking_uri(allow_local: bool = False) -> str:
 
 
 def flatten(d: dict, prefix: str = "") -> dict[str, str]:
-    """Nested config -> {"a.b": "value"}, values cut to MLflow's param limit."""
+    """Nested config -> {"a.b": "value"}, values cut to MLflow's param limit.
+
+    Characters MLflow refuses in names become "_" (att_context_probs keys
+    like "56,0" -> "56_0").
+    """
     out = {}
     for k, v in d.items():
-        key = f"{prefix}{k}"
+        key = f"{prefix}{PARAM_NAME_REFUSED.sub('_', str(k))}"
         if isinstance(v, dict):
             out.update(flatten(v, f"{key}."))
         else:

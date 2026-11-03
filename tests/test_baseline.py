@@ -42,3 +42,28 @@ def test_summarize_combines_scores_stats_and_speed():
     assert row["tag_rate"] == pytest.approx(1.0)
     assert row["rtfx"] == pytest.approx(10.0)
     assert row["ref_latin_word_share"] == pytest.approx(2 / 7)
+
+
+def test_transcribe_prompt_comes_from_target_lang():
+    pytest.importorskip("omegaconf")
+    from omegaconf import DictConfig
+
+    from hinglish_asr.baseline import prompt_from_target_lang
+
+    class FakePromptModel:
+        def __init__(self):
+            self.configs, self.batches = [], []
+
+        def _setup_dataloader_from_config(self, config):
+            self.configs.append(config)
+
+        def _transcribe_forward(self, batch, trcfg):
+            self.batches.append(batch)
+
+    m = FakePromptModel()
+    prompt_from_target_lang(m)
+    m._setup_dataloader_from_config(config=DictConfig({"initialize_prompt_feature": True, "batch_size": 4}))
+    m._setup_dataloader_from_config(config=DictConfig({"batch_size": 4}))  # not a transcribe dataloader
+    assert m.configs[0]["default_prompt_mode"] == "auto" and "default_prompt_mode" not in m.configs[1]
+    m._transcribe_forward(("audio", "lens", "tokens", "token_lens", "dataset_prompts"), trcfg=None)
+    assert m.batches == [("audio", "lens", "tokens", "token_lens")]

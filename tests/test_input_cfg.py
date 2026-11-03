@@ -20,7 +20,7 @@ def test_tarred_dir_becomes_nemo_tarred_entry_with_brace_ranges(tmp_path):
     assert e == {
         "type": "nemo_tarred",
         "manifest_filepath": f"{d}/sharded_manifests/manifest__OP_0..3_CL_.json",
-        "tarred_audio_filepath": f"{d}/audio__OP_0..3_CL_.tar",
+        "tarred_audio_filepaths": f"{d}/audio__OP_0..3_CL_.tar",
         "weight": 0.7,
         "tags": {"prompt_mode": "auto"},
     }
@@ -82,7 +82,7 @@ def test_remote_shards_stream_with_local_manifests(tmp_path):
     d = _remote(tmp_path / "train", 3)
     e = build_entry(str(d), 1.0, "auto")
     assert e["manifest_filepath"] == f"{d}/sharded_manifests/manifest__OP_0..2_CL_.json"
-    assert e["tarred_audio_filepath"] == (
+    assert e["tarred_audio_filepaths"] == (
         "pipe:curl -sfL --retry 10 --retry-delay 5 --retry-all-errors "
         "https://huggingface.co/datasets/org/shards/resolve/abc/train/audio__OP_0..2_CL_.tar"
     )
@@ -107,3 +107,38 @@ def test_cli_writes_a_private_header_file_for_remote_entries(tmp_path, monkeypat
     assert header.stat().st_mode & 0o777 == 0o600
     cfg = (tmp_path / "cfg.yaml").read_text()
     assert f"-H @{header}" in cfg and "hf_secret" not in cfg
+
+
+def test_nemo_reads_the_tarred_entry_from_the_tars(tmp_path):
+    """The entry goes through NeMo's own reader: audio comes out of the tars, not the filesystem."""
+    cutset = pytest.importorskip("nemo.collections.common.data.lhotse.cutset")
+    import io
+    import itertools
+    import tarfile
+
+    import numpy as np
+    import soundfile as sf
+
+    d = tmp_path / "train"
+    (d / "sharded_manifests").mkdir(parents=True)
+    for k in range(2):
+        rows = []
+        with tarfile.open(d / f"audio_{k}.tar", "w") as tar:
+            for j in range(3):
+                name = f"chunk-{k}-{j}.flac"
+                buf = io.BytesIO()
+                sf.write(buf, np.zeros(8000, dtype=np.float32), 16000, format="FLAC")
+                info = tarfile.TarInfo(name)
+                info.size = len(buf.getvalue())
+                buf.seek(0)
+                tar.addfile(info, buf)
+                rows.append({"audio_filepath": name, "duration": 0.5, "text": "ok", "shard_id": k})
+        (d / "sharded_manifests" / f"manifest_{k}.json").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    out = tmp_path / "input_cfg.yaml"
+    main(["--entry", f"{d}:1.0:auto", "--out", str(out)])
+
+    cuts, is_tarred = cutset.read_cutset_from_config({"input_cfg": str(out), "shuffle": False, "seed": 0})
+    cuts = list(itertools.islice(cuts, 6))  # tarred cut sets cycle through the shards forever
+    assert is_tarred
+    assert sorted(c.id for c in cuts) == [f"chunk-{k}-{j}.flac" for k in range(2) for j in range(3)]
+    assert cuts[0].load_audio().shape == (1, 8000)

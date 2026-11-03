@@ -61,8 +61,8 @@ class GChat:
                 with self.opener(request, timeout=self.timeout) as response:
                     response.read()
                 return True
-            except urllib.error.HTTPError as e:  # the URL holds the key: report only the status
-                error = f"HTTP {e.code}"
+            except urllib.error.HTTPError as e:  # the URL holds the key: report the status and Google's reason only
+                error = f"HTTP {e.code}{_reason(e)}"
                 if e.code != 429 and e.code < 500:
                     break
             except OSError as e:  # URLError, timeouts, resets
@@ -71,6 +71,13 @@ class GChat:
                 self.sleep(2 ** (attempt + 1))
         print(f"gchat: message not sent ({error})", file=sys.stderr)
         return False
+
+
+def _reason(e: urllib.error.HTTPError) -> str:
+    try:
+        return ": " + json.loads(e.read())["error"]["message"][:200]
+    except Exception:
+        return ""
 
 
 # ---------- message text ----------

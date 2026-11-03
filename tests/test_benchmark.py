@@ -53,6 +53,21 @@ def test_choose_and_markdown():
     meta = {"run": "runs/x", "latency_ms": 80, "att_context": [56, 0], "prompt": "auto", "val": "v", "test": "t",
             "val_utterances": 2, "val_hours": 1.0, "test_utterances": 2, "test_hours": 1.0}
     md = render_markdown({"meta": meta, "winner": "top1", "candidates": cands,
-                          "checks": {"beats base on val": {"pass": True, "detail": "ok"}}})
+                          "checks": {"beats base on test": {"pass": True, "detail": "ok"}}})
     assert "| top1 **(winner)** | 20.00% | -10.00 [-12.00, -8.00]" in md
     assert "## Test (reported once)" in md and "| avg-top2 |" in md.split("## Test")[0]
+    assert "Held-out clients" not in md and "optimistic for the agent side" in md
+
+
+def test_markdown_reports_held_out_clients_when_given():
+    v = {"wer": 0.2, "cer": 0.1, "lenient_wer": 0.15}
+    cands = {"base": {"val": v, "test": v, "client_test": {**v, "wer": 0.4}},
+             "top1": {"val": v, "test": v, "client_test": v,
+                      "client_test_vs_base": {"delta": -0.2, "ci95": [-0.25, -0.15]}}}
+    meta = {"run": "runs/x", "latency_ms": 80, "att_context": [56, 0], "prompt": "auto", "val": "v", "test": "t",
+            "client_test": "ct", "val_utterances": 2, "val_hours": 1.0, "test_utterances": 2, "test_hours": 1.0,
+            "client_test_utterances": 3, "client_test_hours": 0.5}
+    md = render_markdown({"meta": meta, "winner": "top1", "candidates": cands, "checks": {}})
+    section = md.split("## Held-out clients (reported once)")[1]
+    assert "| base | 40.00% |" in section and "| top1 | 20.00% | -20.00 [-25.00, -15.00]" in section
+    assert "client_test: `ct` (3 utterances, 0.50 h)" in md

@@ -9,7 +9,7 @@ import pyarrow.parquet as pq
 import pytest
 import soundfile as sf
 
-from hinglish_asr.convert import convert, pick_val_small
+from hinglish_asr.convert import ShardUploader, convert, pick_val_small
 from hinglish_asr.input_cfg import build_entry
 
 CFG = {
@@ -124,7 +124,7 @@ def test_convert_writes_matching_tar_shards_and_heldout_manifests(tmp_path, repo
     assert report["files"] == {"planned": 2, "done": 2, "missing": 0, "missing_indices": []}
     assert report["splits"]["train"]["latin_word_share"] == pytest.approx(2 / 5)  # order, cancel of: order N cancel कर दो
     # Shards are numbered 0..N-1, so input_cfg accepts the directory as is.
-    assert build_entry(str(out / "train"), 1.0, "auto")["tarred_audio_filepath"].endswith("audio__OP_0..1_CL_.tar")
+    assert build_entry(str(out / "train"), 1.0, "auto")["tarred_audio_filepaths"].endswith("audio__OP_0..1_CL_.tar")
 
 
 def test_rerun_skips_done_files_and_keeps_output(tmp_path, repo):
@@ -195,10 +195,10 @@ def test_upload_pushes_shards_in_batches_and_frees_local_disk(tmp_path, repo):
     assert remote == report["shard_repo"]
     assert remote["revision"] == "sha2" and remote["shards"] == 2 and remote["missing_count"] == 0
     entry = build_entry(str(out / "train"), 1.0, "auto", auth_header="/home/u/.hf-header")
-    assert entry["tarred_audio_filepath"].endswith(
+    assert entry["tarred_audio_filepaths"].endswith(
         "-H @/home/u/.hf-header https://huggingface.co/datasets/org/shards/resolve/sha2/train/audio__OP_0..1_CL_.tar"
     )
-    assert entry["tarred_audio_filepath"].startswith("pipe:curl -sfL --retry 10")
+    assert entry["tarred_audio_filepaths"].startswith("pipe:curl -sfL --retry 10")
 
 
 def test_upload_resumes_tars_left_by_a_local_run(tmp_path, repo):
@@ -218,3 +218,92 @@ def test_upload_refuses_public_repos_and_the_source_dataset(tmp_path, repo):
         convert(plan, tmp_path / "a", workers=1, local_root=str(root), upload_to="org/shards", api=FakeHub(private=False))
     with pytest.raises(ValueError, match="refusing"):
         convert(plan, tmp_path / "b", workers=1, local_root=str(root), upload_to=CFG["dataset"], api=FakeHub())
+
+
+def test_repeated_or_unusable_ids_are_dropped(tmp_path):
+    root = tmp_path / "repo"
+    rows = [_row(i, f"cust{i}") for i in range(6)]
+    rows += [_row(0, "cust9"), _row(7, "cust7", chunk_id="a/b"), _row(8, "cust8", chunk_id=None)]
+    _parquet(root / "data/combined/f0.parquet", rows)
+    plan = {"config": CFG, "config_sha": "abc", "files": [{"index": 0, "path": "data/combined/f0.parquet"}]}
+    report = convert(plan, tmp_path / "out", workers=1, local_root=str(root))
+    assert {k: v for k, v in report["dropped"].items() if v} == {"duplicate_id": 1, "bad_id": 2}
+
+
+def test_test_clients_are_held_out_of_every_other_split(tmp_path, repo):
+    root, plan = repo
+    _parquet(root / "data/combined/f1.parquet", [_row(200 + i, f"cust{i % 12}", client_id="c2") for i in range(20)])
+    plan["config"] = {**CFG, "test_clients": ["c2"]}
+    out = tmp_path / "out"
+    report = convert(plan, out, workers=1, local_root=str(root))
+    held = _jsonl(out / "client_test_manifest.jsonl")
+    assert len(held) == 20 and {r["client_id"] for r in held} == {"c2"}
+    others = _jsonl(out / "train/sharded_manifests/manifest_0.json") + _jsonl(out / "val_manifest.jsonl")
+    assert others and "c2" not in {r["client_id"] for r in others + _jsonl(out / "test_manifest.jsonl")}
+    assert report["splits"]["client_test"]["utterances"] == 20
+    assert report["splits"]["train"]["top_clients"][0][0] == "c1"
+
+
+def test_rerun_refuses_files_converted_with_another_config(tmp_path, repo):
+    root, plan = repo
+    out = tmp_path / "out"
+    convert(plan, out, workers=1, local_root=str(root), limit_files=1)
+    changed = {**plan, "config": {**CFG, "min_confidence": 0.6}, "config_sha": "def"}
+    with pytest.raises(ValueError, match=r"files \[0\].*different config"):
+        convert(changed, out, workers=1, local_root=str(root))
+
+
+class FlakyHub(FakeHub):
+    def __init__(self, failures):
+        super().__init__()
+        self.failures = failures
+
+    def create_commit(self, *args, **kwargs):
+        if self.failures:
+            self.failures -= 1
+            raise OSError("502 Bad Gateway")
+        return super().create_commit(*args, **kwargs)
+
+
+def test_upload_retries_a_failed_commit(tmp_path, repo):
+    root, plan = repo
+    out = tmp_path / "out"
+    convert(plan, out, workers=1, local_root=str(root))
+    waits = []
+    hub = FlakyHub(failures=2)
+    uploader = ShardUploader("org/shards", out, source_repo=CFG["dataset"], api=hub, sleep=waits.append)
+    uploader.add(0)
+    uploader.flush()
+    assert waits == [30, 60] and len(hub.commits) == 1
+    assert (out / "uploaded/0.json").exists() and not (out / "train/audio_0.tar").exists()
+
+
+def test_upload_that_keeps_failing_stops_the_conversion(tmp_path, repo, monkeypatch):
+    root, plan = repo
+    monkeypatch.setattr("hinglish_asr.convert.time.sleep", lambda s: None)
+    with pytest.raises(OSError):
+        convert(plan, tmp_path / "out", workers=2, local_root=str(root), upload_to="org/shards", upload_batch=1,
+                api=FlakyHub(failures=100))
+
+
+def test_duration_limits_use_the_audio_not_the_metadata(tmp_path):
+    root = tmp_path / "repo"
+    rows = [_row(i, f"cust{i}") for i in range(4)]
+    rows += [_row(10, "c10", audio={"bytes": _flac(21.0), "path": "x"}, duration_s=5.0)]
+    _parquet(root / "data/combined/f0.parquet", rows)
+    plan = {"config": CFG, "config_sha": "abc", "files": [{"index": 0, "path": "data/combined/f0.parquet"}]}
+    report = convert(plan, tmp_path / "out", workers=1, local_root=str(root))
+    assert report["dropped"]["too_long"] == 1
+
+
+def test_heldout_ids_repeated_across_files_are_dropped(tmp_path):
+    root = tmp_path / "repo"
+    cfg = {**CFG, "val_frac": 0.0, "test_frac": 1.0}  # everything held out
+    _parquet(root / "data/combined/f0.parquet", [_row(i, f"a{i}") for i in range(3)])
+    _parquet(root / "data/combined/f1.parquet", [_row(i, f"b{i}") for i in range(2, 5)])  # chunk_0002 again
+    plan = {"config": cfg, "config_sha": "abc",
+            "files": [{"index": 0, "path": "data/combined/f0.parquet"}, {"index": 1, "path": "data/combined/f1.parquet"}]}
+    out = tmp_path / "out"
+    report = convert(plan, out, workers=1, local_root=str(root))
+    assert sorted(r["id"] for r in _jsonl(out / "test_manifest.jsonl")) == ["chunk_0000", "chunk_0001", "chunk_0003", "chunk_0004"]
+    assert report["heldout_id_clashes_dropped"] == 2

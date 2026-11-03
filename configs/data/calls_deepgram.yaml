@@ -1,0 +1,34 @@
+# Training data: Kapture production call chunks from kapturecx/bolAIndia whose
+# transcript came from Deepgram nova-3, the only vendor that writes English
+# words in Latin script. Read by `hinglish_asr.plan`, which copies it into
+# plan.json; `hinglish_asr.convert` reads it from there.
+
+dataset: kapturecx/bolAIndia
+# The dataset grows; file lists and stats are only meaningful at a fixed commit.
+revision: 3e812ecb20f11e074f5d7116a44e752b373cde5e
+
+# Files: every file of these subsets whose stats list rows from `vendor`.
+subsets: [combined, inhouse-asr-2]
+vendor: deepgram_nova-3          # vendor key in stats/*.json
+max_vendor_hours: null           # cap on the vendor hours the stats report; null = all (~2,958 h, 529 GB)
+plan_seed: calls-v1              # file order; any prefix of the plan is a spread-out sample
+
+# Rows
+provider: deepgram               # `provider` column value
+languages: [hi, en]
+min_duration: 0.1
+max_duration: 20.0               # the base model was pre-trained on <= 20 s
+# Deepgram utterance confidence of non-empty rows starts at ~0.5 (sampled
+# file: p5 0.59, p10 0.66). Set after reading the first convert report.
+min_confidence: 0.0
+channels: null                   # e.g. [right]; null = both sides of the call
+
+# Splits: hashed by customer (phone hash), so a customer never straddles splits.
+val_frac: 0.01
+test_frac: 0.01
+split_seed: calls-v1
+val_small_hours: 3.0             # validation subset used during training
+# Whole clients held out of every other split (client_test_manifest.jsonl):
+# val/test share agents and clients with train, this does not. Choose from
+# report.json's splits.train.top_clients after a trial run; [] = none.
+test_clients: []

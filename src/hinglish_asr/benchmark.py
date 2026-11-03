@@ -12,7 +12,14 @@ load). Each is decoded on the full val split at 80 ms
 with the `auto` prompt (offline decoding at that lookahead equals cache-aware
 streaming; the winner is re-checked with the streaming loop on a sample). The
 winner has the lowest val WER. Test is decoded once, for the winner and the
-base model only, so it is never used to choose.
+base model only, so it is never used to choose, and the gain over the base
+model is judged on test: on val it is inflated by having picked the best of
+several candidates there.
+
+val and test hold out customers, not the agents on the other side of the
+call, who also appear in train. --client-test (convert's
+client_test_manifest.jsonl, whole clients and their agents held out) is
+decoded and judged like test.
 
 Per candidate and split: WER/CER and WER by script (`scoring`), lenient WER
 and semdist (`semantic`), breakdowns by language, channel, duration and
@@ -141,16 +148,23 @@ def _delta(d: dict | None) -> str:
     return f"{100 * d['delta']:+.2f} [{100 * lo:+.2f}, {100 * hi:+.2f}]"
 
 
+REPORTED = {"test": "Test (reported once)", "client_test": "Held-out clients (reported once)"}
+
+
 def render_markdown(result: dict) -> str:
     meta, cands = result["meta"], result["candidates"]
+    reported = [s for s in REPORTED if meta.get(s)]
     lines = [
         f"# Benchmark: {meta['run']}",
         "",
         f"- Setting: {meta['latency_ms']} ms lookahead {meta['att_context']}, prompt `{meta['prompt']}`, offline decoding",
-        f"- Val: `{meta['val']}` ({meta['val_utterances']} utterances, {meta['val_hours']:.2f} h); "
-        f"test: `{meta['test']}` ({meta['test_utterances']} utterances, {meta['test_hours']:.2f} h)",
+        "- " + "; ".join(f"{s}: `{meta[s]}` ({meta[f'{s}_utterances']} utterances, {meta[f'{s}_hours']:.2f} h)"
+                         for s in ("val", *reported)),
         "- References are Deepgram transcripts: WER here is agreement with Deepgram.",
         "- Δ vs base: WER change in points, with a 95% interval from resampling customers.",
+        "- val and test share no customer with training, but do share agents and clients"
+        + ("; held-out clients share neither." if "client_test" in reported
+           else ": test WER is optimistic for the agent side and for new clients (see --client-test)."),
         "",
         "## Val (chooses the winner)",
         "",
@@ -165,17 +179,19 @@ def render_markdown(result: dict) -> str:
             f"| {name}{mark} | {_pct(v['wer'])} | {_delta(c.get('val_vs_base'))} | {_pct(v['cer'])} "
             f"| {_pct(v.get('wer_devanagari'))} | {_pct(v.get('wer_latin'))} | {_pct(v['lenient_wer'])} | {sd} |"
         )
-    lines += ["", "## Test (reported once)", "", "| model | WER | Δ vs base | CER | WER Devanagari | WER Latin | lenient WER | semdist |",
-              "|---|---|---|---|---|---|---|---|"]
-    for name, c in cands.items():
-        if "test" not in c:
-            continue
-        t = c["test"]
-        sd = "–" if t.get("semdist_mean") is None else f"{t['semdist_mean']:.4f}"
-        lines.append(
-            f"| {name} | {_pct(t['wer'])} | {_delta(c.get('test_vs_base'))} | {_pct(t['cer'])} "
-            f"| {_pct(t.get('wer_devanagari'))} | {_pct(t.get('wer_latin'))} | {_pct(t['lenient_wer'])} | {sd} |"
-        )
+    for split in reported:
+        lines += ["", f"## {REPORTED[split]}", "",
+                  "| model | WER | Δ vs base | CER | WER Devanagari | WER Latin | lenient WER | semdist |",
+                  "|---|---|---|---|---|---|---|---|"]
+        for name, c in cands.items():
+            if split not in c:
+                continue
+            t = c[split]
+            sd = "–" if t.get("semdist_mean") is None else f"{t['semdist_mean']:.4f}"
+            lines.append(
+                f"| {name} | {_pct(t['wer'])} | {_delta(c.get(f'{split}_vs_base'))} | {_pct(t['cer'])} "
+                f"| {_pct(t.get('wer_devanagari'))} | {_pct(t.get('wer_latin'))} | {_pct(t['lenient_wer'])} | {sd} |"
+            )
     lines += ["", "## Checks", ""]
     for name, check in result["checks"].items():
         lines.append(f"- **{name}**: {'pass' if check['pass'] else 'FAIL'} — {check['detail']}")
@@ -207,6 +223,7 @@ def main(argv: list[str] | None = None) -> dict:
     p.add_argument("--run", required=True, help="training run directory (config.yaml, checkpoints/)")
     p.add_argument("--val", required=True, help="full val manifest from convert")
     p.add_argument("--test", required=True)
+    p.add_argument("--client-test", help="convert's client_test_manifest.jsonl (whole clients held out)")
     p.add_argument("--base", help="base .nemo (default: base_model in the run's config.yaml)")
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--device", default="cuda")
@@ -232,6 +249,9 @@ def main(argv: list[str] | None = None) -> dict:
     out_dir = run_dir / "benchmark"
     (out_dir / "predictions").mkdir(parents=True, exist_ok=True)
     splits = {"val": _read_jsonl(args.val), "test": _read_jsonl(args.test)}
+    if args.client_test:
+        splits["client_test"] = _read_jsonl(args.client_test)
+    reported = [s for s in REPORTED if s in splits]
     if args.limit:
         splits = {k: v[: args.limit] for k, v in splits.items()}
     equivalents = load_equivalents(args.equivalents) if args.equivalents else None
@@ -319,17 +339,18 @@ def main(argv: list[str] | None = None) -> dict:
     winner = choose(candidates)
     lenient_winner = choose(candidates, "lenient_wer")
 
-    # Test: winner and base only, decoded once.
-    test_groups = [r["group"] for r in splits["test"]]
+    # Test (and held-out clients): winner and base only, decoded once.
     for name in dict.fromkeys(["base", winner]):
         load(sources[name])
-        scores, per[(name, "test")] = evaluate(splits["test"], decode(name, "test"), equivalents, semdist)
-        scores.pop("_cross_script_pairs")
-        candidates[name]["test"] = scores
+        for split in reported:
+            scores, per[(name, split)] = evaluate(splits[split], decode(name, split), equivalents, semdist)
+            scores.pop("_cross_script_pairs")
+            candidates[name][split] = scores
     if winner != "base":
-        candidates[winner]["test_vs_base"] = paired_bootstrap(
-            test_groups, per[("base", "test")], per[(winner, "test")], args.bootstrap
-        )
+        for split in reported:
+            candidates[winner][f"{split}_vs_base"] = paired_bootstrap(
+                [r["group"] for r in splits[split]], per[("base", split)], per[(winner, split)], args.bootstrap
+            )
 
     # The winner's weights are loaded now (test decoded last): streaming check, then save.
     sample = random.Random(0).sample(splits["val"], min(args.streaming_sample, len(splits["val"])))
@@ -339,12 +360,14 @@ def main(argv: list[str] | None = None) -> dict:
     if winner != "base":
         model.save_to(str(out_dir / "winner.nemo"))
 
-    gain = candidates[winner].get("val_vs_base")
-    checks = {
-        "beats base on val": {
+    checks = {}
+    for split in reported:
+        gain = candidates[winner].get(f"{split}_vs_base")
+        checks[f"beats base on {split}"] = {
             "pass": bool(gain and gain["ci95"][1] < 0),
             "detail": "winner is the base model" if not gain else f"Δ {_delta(gain)} points; interval must be below 0",
-        },
+        }
+    checks.update({
         "streaming matches offline": {
             "pass": abs(streaming - offline) <= args.streaming_tolerance,
             "detail": f"{len(sample)} val utterances: offline {_pct(offline)}, streaming {_pct(streaming)}",
@@ -353,7 +376,7 @@ def main(argv: list[str] | None = None) -> dict:
             "pass": lenient_winner == winner,
             "detail": f"lowest WER: {winner}; lowest lenient WER: {lenient_winner}",
         },
-    }
+    })
     meta = {
         "run": str(run_dir),
         "base": base,
@@ -362,6 +385,7 @@ def main(argv: list[str] | None = None) -> dict:
         "prompt": DEPLOY_PROMPT,
         "val": args.val,
         "test": args.test,
+        "client_test": args.client_test,
         "equivalents": args.equivalents,
         "semdist_model": semdist.model_name if semdist else None,
         **{f"{s}_utterances": len(rows) for s, rows in splits.items()},
@@ -397,7 +421,7 @@ def _log_mlflow(run_dir: Path, run_cfg: dict, result: dict, out_dir: Path, log_m
         with tracking.run(experiment, f"{run_dir.name}/{name}", stage="benchmark", parent_run_id=train_run_id,
                           tags={"candidate": name, "winner": str(name == result["winner"])}):
             tracking.log_params({"source": c["source"], **{k: result["meta"][k] for k in ("att_context", "prompt", "val")}})
-            for split in ("val", "test"):
+            for split in ("val", *REPORTED):
                 if split in c:
                     tracking.log_metrics(_flat_metrics(c[split]), prefix=f"{split}/")
                 vs = c.get(f"{split}_vs_base")
@@ -408,7 +432,7 @@ def _log_mlflow(run_dir: Path, run_cfg: dict, result: dict, out_dir: Path, log_m
         with tracking.run(experiment, run_id=train_run_id, stage="train"):
             winner = result["candidates"][result["winner"]]
             mlflow.set_tag("benchmark_winner", result["winner"])
-            for split in ("val", "test"):
+            for split in ("val", *REPORTED):
                 if split in winner:
                     tracking.log_metrics(_flat_metrics(winner[split]), prefix=f"benchmark/{split}/")
             # benchmark.* only: predictions and cross-script pairs hold transcripts.

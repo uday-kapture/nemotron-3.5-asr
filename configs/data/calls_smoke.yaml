@@ -1,0 +1,28 @@
+# Smoke run: the first ~8 Deepgram hours of the real plan (same seed, so the
+# same leading files), about 6 files and 1.5 GB to download. Bigger held-out
+# fractions than calls_deepgram.yaml so val and test are not near-empty.
+# Everything else matches the real run.
+
+dataset: kapturecx/bolAIndia
+revision: 3e812ecb20f11e074f5d7116a44e752b373cde5e
+
+subsets: [combined, inhouse-asr-2]
+vendor: deepgram_nova-3
+max_vendor_hours: 8
+plan_seed: calls-v1
+
+provider: deepgram
+languages: [hi, en]
+min_duration: 0.1
+max_duration: 20.0
+min_confidence: 0.0
+channels: null
+
+val_frac: 0.05
+test_frac: 0.05
+split_seed: calls-v1
+val_small_hours: 0.25
+# Whole clients held out of every other split (client_test_manifest.jsonl):
+# val/test share agents and clients with train, this does not. Choose from
+# report.json's splits.train.top_clients after a trial run; [] = none.
+test_clients: []

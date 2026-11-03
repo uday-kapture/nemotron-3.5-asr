@@ -16,13 +16,22 @@ Each planned file k is downloaded whole (range reads of these files are slow:
     train/audio_<k>.tar               training rows of file k, FLAC bytes unchanged, shuffled
     train/sharded_manifests/manifest_<k>.json
     {val,test}/audio/<id>.flac        held-out rows, as plain files for evaluation
+    client_test/audio/<id>.flac       rows of the config's `test_clients`, if any
     parts/<k>.jsonl                   held-out manifest rows of file k
     done/<k>.json                     written last; a rerun skips file k
 
 then merges them into val_manifest.jsonl, test_manifest.jsonl,
 val_small_manifest.jsonl (customer-disjoint subset of val used during
-training) and report.json. Training shard k comes from planned file k, so the
-shards are numbered 0..N-1 as `input_cfg` requires: pass `train/` as its PATH.
+training), client_test_manifest.jsonl and report.json.
+
+val and test hold out customers, but not the agents who talk to them: an
+agent works many calls and is in train too. `test_clients` holds out whole
+clients (businesses), and with them their agents and their vocabulary; pick
+them from report.json's `top_clients` after a trial run. A done file records
+the config's hash, and a rerun with a changed config refuses to mix the two.
+
+Training shard k comes from planned file k, so the shards are numbered
+0..N-1 as `input_cfg` requires: pass `train/` as its PATH.
 
 Manifests keep `group` (hashed customer phone), `client_id`, `channel`,
 `language` and `confidence` for breakdowns.
@@ -75,6 +84,7 @@ class _Job:
     cfg: dict
     cache: str
     local_root: str | None = None
+    config_sha: str | None = None
 
 
 def _fetch(job: _Job) -> tuple[Path, bool]:
@@ -95,8 +105,9 @@ def convert_file(job: _Job) -> dict:
     t0 = time.perf_counter()
     src, downloaded = _fetch(job)
     size = src.stat().st_size
+    test_clients = {str(c) for c in cfg.get("test_clients") or ()}
     dropped, kept, seconds = Counter(), Counter(), Counter()
-    train, held = [], []
+    train, held, ids = [], [], set()
     rows = text_changed = 0
     try:
         pf = pq.ParquetFile(src)
@@ -124,8 +135,28 @@ def convert_file(job: _Job) -> dict:
                 if info.samplerate != SAMPLE_RATE or info.channels != 1:
                     dropped["bad_audio"] += 1
                     continue
+                # duration_s is the dataset's metadata; the manifest records the audio's own length.
+                if info.duration < flt.min_duration:
+                    dropped["too_short"] += 1
+                    continue
+                if info.duration > flt.max_duration:
+                    dropped["too_long"] += 1
+                    continue
+                # The id names the tar member and the held-out file: NeMo pairs tar
+                # members with manifest rows by name, so a repeat would mix up audio and text.
+                rid = str(row.get("chunk_id") or "")
+                if not rid or "/" in rid or rid.startswith("."):
+                    dropped["bad_id"] += 1
+                    continue
+                if rid in ids:
+                    dropped["duplicate_id"] += 1
+                    continue
+                ids.add(rid)
                 group = customer_key(row)
-                split = assign_split(group, cfg["val_frac"], cfg["test_frac"], cfg["split_seed"])
+                if str(row.get("client_id")) in test_clients:
+                    split = "client_test"
+                else:
+                    split = assign_split(group, cfg["val_frac"], cfg["test_frac"], cfg["split_seed"])
                 lang = TARGET_LANG.get(row["language_code"], row["language_code"])
                 conf = row.get("confidence")
                 entry = {
@@ -133,7 +164,7 @@ def convert_file(job: _Job) -> dict:
                     "text": text,
                     "target_lang": lang,
                     "lang": lang,
-                    "id": row["chunk_id"],
+                    "id": rid,
                     "group": group,
                     "language": row["language_code"],
                     "client_id": row.get("client_id"),
@@ -176,6 +207,7 @@ def convert_file(job: _Job) -> dict:
     done = {
         "index": k,
         "path": job.path,
+        "config_sha": job.config_sha,
         "rows": rows,
         "kept": dict(kept),
         "hours": {s: v / 3600 for s, v in seconds.items()},
@@ -201,13 +233,15 @@ class ShardUploader:
     Shards go up in batches, one commit each (the Hub rate-limits commits).
     """
 
-    def __init__(self, repo: str, out: str | Path, *, source_repo: str, batch: int = 25, api=None):
+    def __init__(self, repo: str, out: str | Path, *, source_repo: str, batch: int = 25, api=None,
+                 retries: int = 5, sleep=None):
         if api is None:
             from huggingface_hub import HfApi
 
             api = HfApi()
         ensure_private_repo(api, repo, "dataset", forbidden=(source_repo,))
         self.api, self.repo, self.out, self.batch = api, repo, Path(out), batch
+        self.retries, self.sleep = retries, sleep or time.sleep
         (self.out / "uploaded").mkdir(parents=True, exist_ok=True)
         self.pending: list[int] = []
 
@@ -231,9 +265,19 @@ class ShardUploader:
                 f"train/sharded_manifests/manifest_{k}.json",
                 str(self.out / "train" / "sharded_manifests" / f"manifest_{k}.json"),
             ))
-        info = self.api.create_commit(
-            self.repo, operations=ops, repo_type="dataset", commit_message=f"training shards {shards}"
-        )
+        for attempt in range(self.retries + 1):
+            try:
+                info = self.api.create_commit(
+                    self.repo, operations=ops, repo_type="dataset", commit_message=f"training shards {shards}"
+                )
+                break
+            except Exception as exc:  # a Hub hiccup must not stop a day-long conversion
+                if attempt == self.retries:
+                    raise
+                wait = 30 * 2**attempt
+                print(f"upload of shards {shards} failed ({type(exc).__name__}: {exc}); retrying in {wait} s",
+                      file=sys.stderr)
+                self.sleep(wait)
         for k in shards:
             (self.out / "uploaded" / f"{k}.json").write_text(json.dumps({"commit": info.oid}) + "\n")
             (self.out / "train" / f"audio_{k}.tar").unlink()
@@ -293,6 +337,7 @@ class _Tally:
             "customers": len(self.groups),
             "clients": len(self.clients),
             "top10_client_hour_share": top10 / self.seconds if self.seconds else None,
+            "top_clients": [[c, round(s / 3600, 3)] for c, s in self.clients.most_common(20)],
             "latin_word_share": self.latin / self.words if self.words else None,
             "mixed_script_share": self.mixed / self.n if self.n else None,
         }
@@ -327,17 +372,24 @@ def finalize(out: str | Path, plan: dict, files: list[dict]) -> dict:
             done[f["index"]] = json.loads(marker.read_text())
     missing = [f["index"] for f in files if f["index"] not in done]
 
-    held: dict[str, list[dict]] = {"val": [], "test": []}
+    held: dict[str, list[dict]] = {"val": [], "test": [], "client_test": []}
     for k in sorted(done):
         for row in _jsonl(out / "parts" / f"{k}.jsonl"):
             held[row.pop("split")].append(row)
+    if not cfg.get("test_clients"):
+        del held["client_test"]
+    # Held-out audio is <split>/audio/<id>.flac: an id in two files is one file
+    # holding the later row's audio, so neither row's text can be trusted.
+    seen = Counter(r["id"] for rows in held.values() for r in rows)
+    clashes = sum(n for n in seen.values() if n > 1)
+    held = {split: [r for r in rows if seen[r["id"]] == 1] for split, rows in held.items()}
     for split, rows in held.items():
         rows.sort(key=lambda r: r["id"])
         _write_jsonl(out / f"{split}_manifest.jsonl", rows)
     small = pick_val_small(held["val"], cfg["val_small_hours"], cfg["split_seed"])
     _write_jsonl(out / "val_small_manifest.jsonl", small)
 
-    tallies = {s: _Tally() for s in ("train", "val", "test")}
+    tallies = {s: _Tally() for s in ("train", *held)}
     by_language, by_channel, confidence = Counter(), Counter(), []
     for k in sorted(done):
         for row in _jsonl(out / "train" / "sharded_manifests" / f"manifest_{k}.json"):
@@ -347,7 +399,7 @@ def finalize(out: str | Path, plan: dict, files: list[dict]) -> dict:
     for split, rows in held.items():
         for row in rows:
             tallies[split].add(row)
-    for split in ("val", "test"):
+    for split in held:
         for row in held[split]:
             by_language[row["language"]] += row["duration"]
             by_channel[row["channel"]] += row["duration"]
@@ -362,6 +414,7 @@ def finalize(out: str | Path, plan: dict, files: list[dict]) -> dict:
         "splits": {s: t.summary() for s, t in tallies.items()},
         "val_small": {"utterances": len(small), "hours": round(sum(r["duration"] for r in small) / 3600, 3)},
         "dropped": dict(dropped.most_common()),
+        "heldout_id_clashes_dropped": clashes,
         "train_confidence_quantiles": _quantiles(confidence),
         "heldout_hours_by_language": {k: round(v / 3600, 3) for k, v in by_language.items()},
         "heldout_hours_by_channel": {str(k): round(v / 3600, 3) for k, v in by_channel.items()},
@@ -385,12 +438,23 @@ def convert(
     api=None,
 ) -> dict:
     out = Path(out)
-    for d in ("train/sharded_manifests", "val/audio", "test/audio", "parts", "done"):
+    for d in ("train/sharded_manifests", "val/audio", "test/audio", "client_test/audio", "parts", "done"):
         (out / d).mkdir(parents=True, exist_ok=True)
     files = plan["files"][:limit_files] if limit_files else plan["files"]
     cache = str(cache or out / "cache")
+    sha = plan.get("config_sha")
+    stale = [
+        f["index"] for f in files
+        if (marker := out / "done" / f"{f['index']}.json").exists()
+        and json.loads(marker.read_text()).get("config_sha", sha) != sha
+    ]
+    if stale:
+        raise ValueError(
+            f"files {stale[:10]} in {out} were converted with a different config than this plan "
+            f"(config_sha {sha}); use a new --out, or delete their done/<k>.json to convert them again"
+        )
     jobs = [
-        _Job(f["index"], f["path"], str(out), plan["config"], cache, local_root)
+        _Job(f["index"], f["path"], str(out), plan["config"], cache, local_root, sha)
         for f in files
         if not (out / "done" / f"{f['index']}.json").exists()
     ]
@@ -420,6 +484,11 @@ def convert(
                 )
                 if uploader:
                     uploader.add(res["index"])
+    except BaseException:
+        if pool is not None:
+            # close() would let every queued file convert first, writing its tar locally with nothing uploading it.
+            pool.terminate()
+        raise
     finally:
         if pool is not None:
             pool.close()

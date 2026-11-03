@@ -142,9 +142,10 @@ uv run python -m hinglish_asr.train sweep --arms noam cosine --set model.train_d
 uv run python -m hinglish_asr.train run --arm cosine --name calls-v1 \
     --set model.train_ds.batch_duration=500 --set trainer.max_steps=<from runs/pilot.json>
 
-# 7. benchmark the checkpoints: choose on val, report on test
+# 7. benchmark the checkpoints: choose on val, report on test (and held-out clients)
 uv run python -m hinglish_asr.benchmark --run runs/calls-v1 \
-    --val /data/calls/val_manifest.jsonl --test /data/calls/test_manifest.jsonl
+    --val /data/calls/val_manifest.jsonl --test /data/calls/test_manifest.jsonl \
+    --client-test /data/calls/client_test_manifest.jsonl     # if test_clients is set
 ```
 
 **Data** (`bolai.py`, `plan.py`, `convert.py`, `configs/data/calls_deepgram.yaml`).
@@ -156,15 +157,30 @@ copies the bytes into `train/audio_<k>.tar` (about 105 GB in total) without
 resampling. Rows are split by customer: the phone hash of the called party
 on outbound calls, the caller on inbound ones. 1% of customers each go to
 val and test, and `val_small_manifest.jsonl` (3 h) is the validation set used
-during training. Reruns skip finished files (`done/<k>.json`). `report.json`
-gives hours per split, drops by reason, the Latin-word share (~23% for
-Deepgram), concentration by client, and Deepgram confidence quantiles. Use
-the quantiles to set `min_confidence` before the full conversion.
+during training. That keeps customers apart, not agents: an agent works many
+calls, so the agent side of val and test is speech the model trained on.
+`test_clients` holds whole clients out of every other split
+(`client_test_manifest.jsonl`), and with them their agents; pick them from
+`report.json`'s `splits.train.top_clients` after the trial run.
+
+Reruns skip finished files (`done/<k>.json`). A done file records the
+config's hash, so after changing the config (and rerunning `plan`) convert
+refuses an `--out` that holds files made with the old one; use a new `--out`
+or delete those `done/<k>.json`. Rows whose `chunk_id` repeats within a file,
+or is unusable as a file name, are dropped (`duplicate_id`, `bad_id`): NeMo
+pairs tar members with manifest rows by name. A held-out id found in two files
+is dropped from both (`heldout_id_clashes_dropped`), as they share one audio
+file. Duration limits apply to the audio's own length, not `duration_s`. `report.json` gives hours per
+split, drops by reason, the Latin-word share (~23% for Deepgram), hours by
+client, and Deepgram confidence quantiles. Use the quantiles to set
+`min_confidence` before the full conversion.
 
 **Streaming the training shards** (`convert --upload-to REPO`).
 - **During conversion:** each finished tar and its manifest go to a private
   HF dataset repo in batched commits (25 shards each), and the local tar is
-  deleted.
+  deleted. A failed commit is retried 5 times (30 s to 8 min apart); if it
+  still fails, conversion stops at once, rather than converting the remaining
+  files into local tars. Rerun to continue.
 - **Peak local disk:** one batch of tars, plus the parquet files in flight
   (about 2 GB at `--workers 8`), plus manifests and val/test (about 3 GB).
 - **During training:** `input_cfg` sees `train/remote.json` and writes the tar
@@ -182,7 +198,9 @@ the quantiles to set `min_confidence` before the full conversion.
 
 **Training** (`train.py`, `configs/train.yaml`) follows NeMo's
 `speech_to_text_finetune.py`. It adds:
-- validation at 80 ms with the auto prompt and language tags stripped;
+- validation at 80 ms with the auto prompt; `val_wer` scores the
+  benchmark's normalization (tags, case, punctuation), so the top-k it keeps
+  are the ones the benchmark would rank best;
 - lookahead sampling weighted to 80 ms (`att_context_probs`; NeMo's default
   is uniform over the four trained lookaheads);
 - validation loss, plus the top-5 and last checkpoints by `val_wer` (one
@@ -196,7 +214,12 @@ per `batch_duration` in separate processes. It picks the fastest one whose
 peak memory stays under 85% of the GPU, and turns the measured audio seconds
 per step into `max_steps` for N passes. `sweep` runs the `noam` (peak 3e-4)
 and `cosine` (1e-4) arms for equal steps and compares their best `val_wer`.
-Rerunning the same `--name` resumes from its last checkpoint.
+Each arm's LR schedule spans the full run's `max_steps` (from
+`runs/pilot.json`, or `--schedule-steps`), so a 4,000-step arm follows the
+first 4,000 steps of the schedule it would have in the full run, instead of
+annealing to `min_lr` within the sweep. Child runs log to
+`runs/logs/<name>.log`. Rerunning the same `--name` resumes from its last
+checkpoint.
 
 **Checkpoints on the Hub** (`checkpoint_hub_repo` in `configs/train.yaml`).
 Set it to a private HF model repo and the top-k checkpoints are never
@@ -215,25 +238,29 @@ takes to upload.
 - **Candidates:** the base model, the top-k checkpoints, the last checkpoint,
   and the average of the top-k weights. Each is decoded on the full val split
   at 80 ms with `auto`.
-- **Choosing:** lowest val WER wins. Test is decoded only for the winner and
-  the base model.
+- **Choosing:** lowest val WER wins. Test (and `--client-test`) is decoded only
+  for the winner and the base model.
 - **Metrics:**
   - WER/CER and WER by script;
   - **lenient WER**: cross-script spellings (`order`/`ऑर्डर`), Devanagari
     variants (`है`/`हैं`), number words vs digits and split words count as
-    matches;
+    matches. A number that is wrong or missing costs every word it was
+    written with, as in plain WER. Written forms match spoken ones (`0987` /
+    `शून्य नौ आठ सात`, `1,50,000` / `डेढ़ लाख`), and lenient WER is never above
+    plain WER;
   - **semdist** (LaBSE);
   - breakdowns by language, channel, duration and client;
   - the change against the base model, with a 95% interval from resampling
     customers.
-- **Checks:** the gain's interval is below zero; true streaming matches
-  offline decoding on 500 val utterances; and lenient WER picks the same
-  winner.
+- **Checks:** the gain's interval on test (and on held-out clients) is below
+  zero; val is not used for this, because picking the best of several
+  candidates there inflates its gain. Also: true streaming matches offline
+  decoding on 500 val utterances, and lenient WER picks the same winner.
 - **Outputs:** `runs/<name>/benchmark/benchmark.md` and `winner.nemo`.
   Predictions and `cross_script_pairs.json` (the cross-script matches to
   audit) hold transcripts and stay on the box.
 
-Both eval splits are scored against Deepgram's transcripts, so every call WER
+All eval splits are scored against Deepgram's transcripts, so every call WER
 here measures agreement with Deepgram, not accuracy.
 
 **MLflow** (`tracking.py`). Every stage refuses to run without

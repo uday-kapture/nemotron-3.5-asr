@@ -19,6 +19,11 @@ def test_basic_and_token_auth_together_warn(monkeypatch, capsys):
     assert "Basic auth only" in capsys.readouterr().err
 
 
+def test_flatten_makes_names_mlflow_accepts():
+    flat = tracking.flatten({"model": {"att_context_probs": {"56,0": 0.55, "56,13": 0.15}}})
+    assert flat == {"model.att_context_probs.56_0": "0.55", "model.att_context_probs.56_13": "0.15"}
+
+
 def test_flatten_nests_keys_and_truncates():
     flat = tracking.flatten({"a": {"b": 1, "c": [56, 0]}, "s": "x" * 600, "n": None})
     assert flat["a.b"] == "1" and flat["a.c"] == "[56, 0]" and flat["n"] == "null"

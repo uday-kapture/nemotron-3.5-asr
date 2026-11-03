@@ -21,7 +21,8 @@ class FakeOpener:
         if isinstance(outcome, BaseException):
             raise outcome
         if outcome != 200:
-            raise urllib.error.HTTPError(request.full_url, outcome, "error", {}, io.BytesIO())
+            body = json.dumps({"error": {"code": outcome, "message": "Invalid space"}}).encode()
+            raise urllib.error.HTTPError(request.full_url, outcome, "error", {}, io.BytesIO(body))
         return io.BytesIO(b"{}")
 
 
@@ -47,6 +48,7 @@ def test_retries_rate_limits_and_server_errors_then_gives_up_quietly(capsys):
     assert not chat.send("x") and len(opener.requests) == 3
     chat, opener = _chat(400)  # a bad request is not retried
     assert not chat.send("x") and len(opener.requests) == 1
+    assert "HTTP 400: Invalid space" in capsys.readouterr().err
     chat, opener = _chat(TimeoutError(), TimeoutError(), TimeoutError())
     assert not chat.send("x")
     assert "secret" not in capsys.readouterr().err  # the URL holds the key

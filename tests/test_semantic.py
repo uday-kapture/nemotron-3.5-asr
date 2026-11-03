@@ -71,3 +71,41 @@ def test_lenient_wer_still_counts_real_errors():
 def test_lenient_skips_empty_references_like_score_corpus():
     out = lenient_scores(["", "हाँ"], ["कुछ", "हां"])
     assert out["per_utterance"] == [None, (0, 1)]
+
+
+def test_a_wrong_or_missing_number_costs_every_word():
+    ref = "मेरा नंबर नौ आठ सात छह पांच चार तीन दो एक शून्य है"
+    wrong = lenient_scores([ref], ["मेरा नंबर 1 2 3 4 5 6 7 8 9 0 है"])
+    assert wrong["per_utterance"] == [(10, 13)]
+    assert lenient_scores([ref], ["मेरा नंबर है"])["per_utterance"] == [(10, 13)]
+    assert lenient_scores([ref], ["मेरा नंबर 9876543210 है"])["per_utterance"] == [(0, 13)]
+    # दो सौ vs 300: two reference words wrong, as in plain WER
+    assert lenient_scores(["दो सौ रुपये"], ["300 रुपये"])["per_utterance"] == [(2, 3)]
+
+
+@pytest.mark.parametrize(
+    "words,value",
+    [("शून्य नौ आठ", "#098"), ("0987", "#0987"), ("1 50 000", "#150000"), ("98765 43210", "#9876543210"),
+     ("1 लाख 50000", "#150000"), ("2 लाख 50 हज़ार", "#250000")],
+)
+def test_digit_strings_keep_leading_zeros_and_join_groups(words, value):
+    [(canon, _)] = canonical_tokens(words.split())
+    assert canon == value
+
+
+def test_switching_between_digits_and_number_words_starts_a_new_number():
+    assert [c for c, _ in canonical_tokens("1 000 दो".split())] == ["#1000", "#2"]
+
+
+@pytest.mark.parametrize(
+    "ref,hyp,errors",
+    [("नंबर शून्य नौ आठ सात है", "नंबर 0987 है", 0), ("₹1,000 दो", "एक हज़ार रुपये दो", 1),
+     ("1,50,000 रुपये", "डेढ़ लाख रुपये", 0), ("10,000", "10000", 0)],
+)
+def test_formatted_numbers_match_their_spoken_form(ref, hyp, errors):
+    assert lenient_scores([ref], [hyp])["per_utterance"][0][0] == errors
+
+
+def test_lenient_never_counts_more_than_plain_wer():
+    # पांच सौ दो is 502, or 500 + "give": reading it as one number would cost 4.
+    assert lenient_scores(["पांच सौ दो"], ["500 दो"])["per_utterance"] == [(2, 3)]

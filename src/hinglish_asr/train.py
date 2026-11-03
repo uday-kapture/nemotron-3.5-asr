@@ -1,29 +1,32 @@
 """Fine-tune the prompt model on the converted calls: pilot, LR sweep, full run.
 
-    X="uv run --extra nemo --extra mlflow python -m hinglish_asr.train"
+    hx() { local m=$1; shift; uv run --extra nemo --extra mlflow python -m "hinglish_asr.$m" "$@"; }
 
     # 1. pilot: ~300 steps per batch size -> batch_duration, speed, max_steps
-    $X pilot --config configs/train.yaml --arm cosine --batch-durations 300 400 500 600 --passes 3
+    hx train pilot --config configs/train.yaml --arm cosine --batch-durations 300 400 500 600 --passes 3
 
-    # 2. sweep: equal-length runs, one per arm; compare best val_wer
-    $X sweep --config configs/train.yaml --arms noam cosine --set model.train_ds.batch_duration=500
+    # 2. sweep: equal-length runs, one per arm, each on the first steps of the
+    #    full run's LR schedule (length from runs/pilot.json); compare best val_wer
+    hx train sweep --config configs/train.yaml --arms noam cosine --set model.train_ds.batch_duration=500
 
     # 3. the full run with the sweep's arm and the pilot's max_steps
-    $X run --config configs/train.yaml --arm cosine --name calls-v1 \\
+    hx train run --config configs/train.yaml --arm cosine --name calls-v1 \\
         --set model.train_ds.batch_duration=500 --set trainer.max_steps=60000
 
 Follows NeMo's speech_to_text_finetune.py (restore the .nemo; set data,
 optimizer and SpecAugment from the config; fit) and adds what it leaves out:
 
-- validation at the deployment lookahead (80 ms) with the `auto` prompt and
-  language tags stripped from the hypotheses;
+- validation at the deployment lookahead (80 ms) with the `auto` prompt, and
+  val_wer on the benchmark's normalization (tags, case, punctuation);
 - `att_context_probs`: how often each trained lookahead is used per batch;
 - validation loss, top-k + last checkpoints by val_wer, one .nemo at the end;
 - an MLflow logger with an explicit tracking URI (`tracking`);
 - a throughput callback (s/step, audio s/step, peak GPU memory).
 
 Runs live in <run_root>/<name>/ (config.yaml, checkpoints/, mlflow_run_id,
-result.json). Rerunning the same name resumes from its last checkpoint.
+result.json); pilot and sweep write each child's output to
+<run_root>/logs/<name>.log. Rerunning the same name resumes from its last
+checkpoint.
 
 With `checkpoint_hub_repo` set, top-k checkpoints are never written locally:
 each goes straight to runs/<name>/ in that private HF model repo as weights
@@ -124,8 +127,9 @@ def steps_for(train_hours: float, passes: float, audio_s_per_step: float) -> int
 def pick_batch_duration(results: list[dict], memory_fraction: float = 0.85) -> dict | None:
     """Fastest pilot (audio seconds per wall second) that kept peak memory under the cap."""
     ok = [
-        r for r in results
-        if r.get("status") == "ok" and r["peak_reserved_gb"] <= memory_fraction * r["total_memory_gb"]
+        r for r in results  # an ok run that measured no steps has no throughput numbers
+        if r.get("status") == "ok" and "peak_reserved_gb" in r
+        and r["peak_reserved_gb"] <= memory_fraction * r["total_memory_gb"]
     ]
     return max(ok, key=lambda r: r["audio_s_per_s"], default=None)
 
@@ -199,8 +203,7 @@ def _notify_callback(chat, name: str, stage: str, cfg: dict, check_loss_every: i
         def on_train_start(self, trainer, pl_module):
             self.step = self.first_step = trainer.global_step  # > 0 when resuming
             self.started = time.perf_counter()
-            ckpt = trainer.checkpoint_callback  # restored by now: a resumed run keeps its best
-            self.best = float(ckpt.best_model_score) if ckpt is not None and ckpt.best_model_score is not None else None
+            self.best = best_val_wer(trainer)  # checkpoint state is restored by now: a resumed run keeps its best
             self._reset_window(self.step)
             gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "no GPU"
             batch_duration = cfg["model"]["train_ds"].get("batch_duration")
@@ -280,7 +283,76 @@ def _hub_checkpoint_io(hub, tmp_dir: Path):
             # trims itself on upload, so only a local file (if any) goes.
             super().remove_checkpoint(path)
 
-    return HubCheckpointIO()
+    io = HubCheckpointIO()
+    io.hub = hub
+    return io
+
+
+def best_val_wer(trainer) -> float | None:
+    """Best val_wer of the run so far.
+
+    With hub checkpoints, NeMo's checkpoint callback forgets the top k on
+    resume (it drops entries with no local file), so the hub's ranking is
+    the record.
+    """
+    hub = getattr(trainer.strategy.checkpoint_io, "hub", None)
+    if hub is not None:
+        ranked = hub.list()
+        return ranked[0][1] if ranked else None
+    ckpt = trainer.checkpoint_callback
+    return float(ckpt.best_model_score) if ckpt is not None and ckpt.best_model_score is not None else None
+
+
+def normalize_val_wer(wer) -> None:
+    """Score NeMo's val_wer on text normalized as the benchmark scores it.
+
+    NeMo compares raw strings, so case and punctuation count as errors and
+    the top-k kept by val_wer need not be the checkpoints the benchmark ranks
+    best. References and hypotheses both go through
+    `scoring.normalize_for_scoring` (tags, case, punctuation) instead.
+    """
+    from .scoring import normalize_for_scoring
+
+    class References:
+        def __init__(self, decoding):
+            self._decoding = decoding
+
+        def decode_ids_to_str(self, ids):
+            return normalize_for_scoring(self._decoding.decode_ids_to_str(ids))
+
+        def __getattr__(self, name):
+            return getattr(self._decoding, name)
+
+    decode = wer.decode
+
+    def decode_normalized(*args):
+        hyps = decode(*args)
+        for h in hyps:
+            for one in h if isinstance(h, list) else [h]:
+                one.text = normalize_for_scoring(one.text)
+        return hyps
+
+    wer.decoding = References(wer.decoding)
+    wer.decode = decode_normalized
+
+
+def setup_optimization(model, optim: dict, schedule_steps: int | None) -> None:
+    """model.setup_optimization, with the LR schedule spanning `schedule_steps`.
+
+    NeMo sizes the schedule by trainer.max_steps. A sweep run stops early but
+    should follow the start of the full run's schedule, not a squeezed copy
+    that anneals within the sweep (and so flatters the arms that anneal).
+    """
+    from omegaconf import OmegaConf
+
+    loop = model.trainer.fit_loop.epoch_loop
+    stop = loop.max_steps
+    if schedule_steps:
+        loop.max_steps = schedule_steps
+    try:
+        model.setup_optimization(OmegaConf.create(optim))
+    finally:
+        loop.max_steps = stop
 
 
 def _setup_model(model, cfg: dict) -> dict:
@@ -302,6 +374,7 @@ def _setup_model(model, cfg: dict) -> dict:
     with open_dict(model.cfg):
         model.cfg.compute_eval_loss = m["compute_eval_loss"]
     model.decoding.set_strip_lang_tags(True)
+    normalize_val_wer(model.wer)
     if m.get("fused_batch_size"):
         model.joint.set_fused_batch_size(m["fused_batch_size"])
     applied["fused_batch_size"] = model.joint.fused_batch_size
@@ -318,7 +391,10 @@ def _setup_model(model, cfg: dict) -> dict:
         model.cfg.validation_ds = val_ds
     model.setup_training_data(OmegaConf.create(train_ds))
     model.setup_multiple_validation_data(OmegaConf.create(val_ds))
-    model.setup_optimization(OmegaConf.create(resolve_optim(m["optim"])))
+    optim = dict(m["optim"])
+    schedule_steps = optim.pop("schedule_steps", None)
+    setup_optimization(model, resolve_optim(optim), schedule_steps)
+    applied["schedule_steps"] = schedule_steps or model.trainer.max_steps
     model.spec_augment = ASRModel.from_config_dict(OmegaConf.create(m["spec_augment"]))
     return applied
 
@@ -350,7 +426,14 @@ def _fit(cfg: dict, name: str, stage: str, parent_run_id: str | None, callbacks:
 
     run_dir = Path(cfg["run_root"]) / name
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
+    # exp_manager moves every loose file in run_dir into run_<n>/ (keeping the
+    # previous attempt's logs), so this run's files are read before it and
+    # written after it.
+    id_file = run_dir / "mlflow_run_id"
+    # Continue the MLflow run only when training continues too: without a
+    # -last checkpoint the run restarts at step 0 and gets a fresh MLflow run.
+    resumable = any((run_dir / "checkpoints").glob("*-last.ckpt"))
+    mlflow_run_id = id_file.read_text().strip() if id_file.exists() and resumable else None
     throughput = _throughput_callback(run_dir / "throughput.json")
     ckpt_params, plugins = dict(cfg["checkpoint"]), []
     hub_repo = cfg.get("checkpoint_hub_repo")
@@ -360,7 +443,6 @@ def _fit(cfg: dict, name: str, stage: str, parent_run_id: str | None, callbacks:
         hub = HubCheckpoints(hub_repo, name, keep=ckpt_params["save_top_k"])
         plugins.append(_hub_checkpoint_io(hub, run_dir / "upload-tmp"))
         ckpt_params.update(save_best_model=False, save_nemo_on_train_end=False)
-        (run_dir / "checkpoint_hub.json").write_text(json.dumps({"repo": hub_repo, "run": name}) + "\n")
     trainer = pl.Trainer(
         **cfg["trainer"], logger=False, enable_checkpointing=False, callbacks=[throughput, *callbacks], plugins=plugins
     )
@@ -381,22 +463,25 @@ def _fit(cfg: dict, name: str, stage: str, parent_run_id: str | None, callbacks:
             }
         ),
     )
-    id_file = run_dir / "mlflow_run_id"
+    (run_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
+    if plugins:
+        (run_dir / "checkpoint_hub.json").write_text(json.dumps({"repo": hub_repo, "run": name}) + "\n")
     tags = {"stage": stage, "arm": str(cfg.get("arm")), "run_dir": str(run_dir.resolve())}
     if parent_run_id:
         tags[tracking.PARENT_TAG] = parent_run_id
-    resuming = id_file.exists()
-    logger = tracking.lightning_logger(
-        cfg["mlflow"]["experiment"], name, tags=tags, run_id=id_file.read_text().strip() if resuming else None
-    )
+    resuming = mlflow_run_id is not None
+    logger = tracking.lightning_logger(cfg["mlflow"]["experiment"], name, tags=tags, run_id=mlflow_run_id)
     trainer.loggers = [logger]
-    id_file.write_text(logger.run_id + "\n")
+    if resuming:
+        id_file.write_text(logger.run_id + "\n")
 
     model = ASRModel.restore_from(cfg["base_model"], map_location="cpu")
     model.set_trainer(trainer)
     applied = _setup_model(model, cfg)
     if not resuming:  # MLflow params are write-once; config.yaml records any change
         logger.log_hyperparams({**tracking.flatten(cfg), **tracking.flatten({"applied": applied})})
+        # Recorded only once the params are in: a run that failed during setup starts a fresh MLflow run.
+        id_file.write_text(logger.run_id + "\n")
     trainer.fit(model)
 
     ckpt = trainer.checkpoint_callback
@@ -405,7 +490,7 @@ def _fit(cfg: dict, name: str, stage: str, parent_run_id: str | None, callbacks:
         "stage": stage,
         "arm": cfg.get("arm"),
         "mlflow_run_id": logger.run_id,
-        "best_val_wer": float(ckpt.best_model_score) if ckpt is not None and ckpt.best_model_score is not None else None,
+        "best_val_wer": best_val_wer(trainer),
         "best_model_path": getattr(ckpt, "best_model_path", None) if ckpt is not None else None,
         "checkpoint_hub_repo": hub_repo if stage != "pilot" else None,
         "applied": applied,
@@ -427,9 +512,11 @@ def _child(args, name: str, stage: str, arm: str | None, sets: list[str], parent
         cmd += ["--parent-run-id", parent]
     for s in sets:
         cmd += ["--set", s]
-    run_dir = Path(load_config(args.config)["run_root"]) / name
-    run_dir.mkdir(parents=True, exist_ok=True)
-    log = run_dir / "train.log"
+    run_root = Path(load_config(args.config, arm, sets)["run_root"])
+    run_dir = run_root / name
+    # Outside run_dir: exp_manager moves every loose file there into run_<n>/ at start.
+    log = run_root / "logs" / f"{name}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
     print(f"{name}: running, log in {log}", file=sys.stderr)
     with log.open("w") as fh:
         returncode = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT).returncode
@@ -500,9 +587,17 @@ def sweep(args) -> dict:
     from . import tracking
 
     cfg = load_config(args.config, None, args.set)
-    sets = [*args.set, f"trainer.max_steps={args.steps}"] if args.steps else list(args.set)
+    schedule_steps = args.schedule_steps
+    pilot_file = Path(cfg["run_root"]) / "pilot.json"
+    if schedule_steps is None and pilot_file.exists():
+        schedule_steps = json.loads(pilot_file.read_text()).get("max_steps")
+    if schedule_steps is None:
+        sys.exit(f"sweep needs the full run's length for the LR schedule: --schedule-steps N, or run pilot first ({pilot_file})")
+    sets = [*args.set, f"model.optim.schedule_steps={schedule_steps}"]
+    if args.steps:
+        sets.append(f"trainer.max_steps={args.steps}")
     with tracking.run(cfg["mlflow"]["experiment"], args.name, stage="sweep") as parent:
-        tracking.log_params({"arms": args.arms, "overrides": args.set, "steps": args.steps})
+        tracking.log_params({"arms": args.arms, "overrides": args.set, "steps": args.steps, "schedule_steps": schedule_steps})
         results = [_child(args, f"{args.name}-{arm}", "sweep", arm, sets, parent.info.run_id) for arm in args.arms]
         done = [r for r in results if r["status"] == "ok" and r.get("best_val_wer") is not None]
         winner = min(done, key=lambda r: r["best_val_wer"], default=None)
@@ -556,6 +651,8 @@ def main(argv: list[str] | None = None):
     common(s)
     s.add_argument("--arms", nargs="+", default=["noam", "cosine"])
     s.add_argument("--steps", type=int, help="default: trainer.max_steps in the config")
+    s.add_argument("--schedule-steps", type=int,
+                   help="length of the full run's LR schedule, which each arm follows for --steps (default: pilot.json)")
     s.add_argument("--name", default="sweep")
 
     args = p.parse_args(argv)

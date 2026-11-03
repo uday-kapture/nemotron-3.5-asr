@@ -63,3 +63,14 @@ def test_private_repo_checks():
         ensure_private_repo(FakeModelRepo(private=False), "org/x", "model")
     with pytest.raises(ValueError, match="refusing"):
         ensure_private_repo(FakeModelRepo(), "org/src", "dataset", forbidden=("org/src",))
+
+
+def test_reuploading_a_name_does_not_take_two_top_k_slots(tmp_path):
+    hub_api = FakeModelRepo()
+    hub = HubCheckpoints("org/ckpts", "calls-v1", keep=2, api=hub_api)
+    local = tmp_path / "w.ckpt"
+    local.write_bytes(b"weights")
+    hub.add(local, _ck(1000, 0.30))
+    hub.add(local, _ck(2000, 0.25))
+    assert hub.add(local, _ck(2000, 0.25))  # the same validation again, after a resume
+    assert [n for n, _ in hub.list()] == [_ck(2000, 0.25), _ck(1000, 0.30)]

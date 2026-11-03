@@ -61,7 +61,9 @@ class HubCheckpoints:
     def add(self, local: str | Path, name: str) -> bool:
         """Upload `local` as `name` if it ranks in the top k; drop what falls out. False if not uploaded."""
         existing = self.list()
-        keep = {n for n, _ in rank_checkpoints([n for n, _ in existing] + [name])[: self.keep]}
+        # A name already there (validation repeated at that step after a resume) is replaced, not counted twice.
+        names = list(dict.fromkeys([n for n, _ in existing] + [name]))
+        keep = {n for n, _ in rank_checkpoints(names)[: self.keep]}
         if name not in keep:
             return False
         ops = [CommitOperationAdd(f"{self.prefix}/{name}", str(local))]

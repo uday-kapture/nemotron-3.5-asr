@@ -102,7 +102,31 @@ def load_model(name: str, device: str):
     # Keep <xx-XX> tags in the raw output: whether the model emits them is a
     # finding. Scoring strips them.
     model.decoding.set_strip_lang_tags(False)
+    prompt_from_target_lang(model)
     return model.to(device=device, dtype=torch.float32).eval()
+
+
+def prompt_from_target_lang(model) -> None:
+    """Make transcribe() use its target_lang as the prompt.
+
+    NeMo's transcribe dataloader leaves default_prompt_mode at "unified": per
+    file it picks either auto or the file's language, and transcribe never
+    sets a language, so about half the batches crash. When a batch survives,
+    those dataset prompt indices override target_lang. The dataloader is set
+    to "auto" (it no longer crashes) and the forward pass drops the dataset's
+    indices, so the prompt comes from target_lang.
+    """
+    from omegaconf import OmegaConf
+
+    setup, forward = model._setup_dataloader_from_config, model._transcribe_forward
+
+    def setup_auto(config):
+        if config.get("initialize_prompt_feature") and "default_prompt_mode" not in config:
+            config = OmegaConf.merge(config, {"default_prompt_mode": "auto"})
+        return setup(config=config)
+
+    model._setup_dataloader_from_config = setup_auto
+    model._transcribe_forward = lambda batch, trcfg: forward(tuple(batch)[:4], trcfg)
 
 
 def _texts(hyps) -> list[str]:

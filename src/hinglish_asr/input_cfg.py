@@ -93,7 +93,7 @@ def build_entry(
         entry = {
             "type": "nemo_tarred",
             "manifest_filepath": f"{p}/sharded_manifests/manifest__OP_0..{remote['shards'] - 1}_CL_.json",
-            "tarred_audio_filepath": streamed_tars(remote, auth_header),
+            "tarred_audio_filepaths": streamed_tars(remote, auth_header),
             "weight": weight,
         }
     elif p.is_dir():
@@ -107,7 +107,7 @@ def build_entry(
         entry = {
             "type": "nemo_tarred",
             "manifest_filepath": f"{p}/sharded_manifests/manifest__OP_0..{n - 1}_CL_.json",
-            "tarred_audio_filepath": f"{p}/audio__OP_0..{n - 1}_CL_.tar",
+            "tarred_audio_filepaths": f"{p}/audio__OP_0..{n - 1}_CL_.tar",
             "weight": weight,
         }
     elif p.is_file():

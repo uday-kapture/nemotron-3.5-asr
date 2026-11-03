@@ -20,6 +20,12 @@ dependencies = [
 # scoring run without torch.
 nemo = [
     "nemo-toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech.git@v3.0.0",
+    # NeMo's RNNT loss kernels need numba-cuda, which NeMo installs only via its
+    # cu12/cu13 extras; plain numba's CUDA target fails to compile the gradient
+    # kernel. cu13 matches the CUDA 13 torch wheels this lock resolves to.
+    "numba-cuda[cu13] ; sys_platform == 'linux'",
+    # numba-cuda 0.30.4 (latest) still calls np.row_stack, removed in numpy 2.5.
+    "numpy<2.5",
 ]
 mlflow = [
     "mlflow>=3.11.1",
