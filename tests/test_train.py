@@ -1,4 +1,6 @@
 import argparse
+import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -9,6 +11,8 @@ import pytest
 from hinglish_asr import train
 from hinglish_asr.train import (
     _child,
+    big_tmpdir,
+    last_error,
     apply_overrides,
     best_val_wer,
     context_probs,
@@ -107,7 +111,52 @@ def test_child_reads_its_log_after_exp_manager_moves_the_run_dir_files(tmp_path,
     args = argparse.Namespace(config=str(cfg))
     r = _child(args, "pilot-bd600", "pilot", None, ["model.x=1"], None)
     assert r["status"] == "oom" and "out of memory" in r["log_tail"]
+    assert r["error"] == "torch.OutOfMemoryError: CUDA out of memory"
+    assert r["log"] == str(tmp_path / "runs" / "logs" / "pilot-bd600.log")
     assert (tmp_path / "runs" / "logs" / "pilot-bd600.log").exists()
+
+
+def _fake_child(tmp_path, monkeypatch, returncode, write_result, stale=None):
+    cfg = tmp_path / "train.yaml"
+    cfg.write_text(f"run_root: {tmp_path / 'runs'}\n")
+    run_dir = tmp_path / "runs" / "pilot-bd300"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    if stale is not None:  # left by an earlier attempt
+        (run_dir / "result.json").write_text(json.dumps(stale))
+        os.utime(run_dir / "result.json", (0, 0))
+
+    def child(cmd, stdout, stderr):
+        stdout.write("Trainer.fit stopped: max_steps=300 reached.\n")
+        if write_result:
+            (run_dir / "result.json").write_text(json.dumps({"name": "pilot-bd300", "throughput": {"s_per_step": 0.2}}))
+        return subprocess.CompletedProcess(cmd, returncode)
+
+    monkeypatch.setattr(train.subprocess, "run", child)
+    return _child(argparse.Namespace(config=str(cfg)), "pilot-bd300", "pilot", None, [], None)
+
+
+def test_a_run_that_wrote_its_result_counts_even_if_it_crashed_on_exit(tmp_path, monkeypatch):
+    r = _fake_child(tmp_path, monkeypatch, returncode=-11, write_result=True)
+    assert r["status"] == "ok" and r["throughput"] == {"s_per_step": 0.2} and r["returncode"] == -11
+
+
+def test_a_stale_result_from_an_earlier_attempt_does_not_count(tmp_path, monkeypatch):
+    r = _fake_child(tmp_path, monkeypatch, returncode=1, write_result=False, stale={"name": "old"})
+    assert r["status"] == "failed" and r["returncode"] == 1
+
+
+@pytest.mark.parametrize(
+    "tail,line",
+    [
+        ("Traceback (most recent call last):\n  File \"x.py\", line 1\nKeyError: 'val_wer'\n", "KeyError: 'val_wer'"),
+        ("x\nhinglish_asr.tracking.TrackingError: MLFLOW_TRACKING_URI is not set\n[NeMo W] done\n",
+         "hinglish_asr.tracking.TrackingError: MLFLOW_TRACKING_URI is not set"),
+        ("nothing named here\nlast words\n", "last words"),
+        ("", "(empty log)"),
+    ],
+)
+def test_last_error_finds_the_line_naming_the_failure(tail, line):
+    assert last_error(tail) == line
 
 
 class _Hub:
@@ -150,3 +199,14 @@ def test_schedule_spans_schedule_steps_but_training_stops_at_max_steps():
     setup_optimization(model, {"lr": 1e-4}, None)
     assert seen == [(60000, 1e-4), (4000, 1e-4)]
     assert loop.max_steps == 4000
+
+
+def test_temp_files_go_next_to_the_runs_unless_tmpdir_is_set(tmp_path, monkeypatch):
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    monkeypatch.delenv("TMPDIR", raising=False)
+    assert big_tmpdir(tmp_path / "runs") == (tmp_path / "runs" / "tmp").resolve()
+    assert tempfile.gettempdir() == str((tmp_path / "runs" / "tmp").resolve())
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "big"))  # set but missing: created, not ignored
+    assert big_tmpdir(tmp_path / "runs") == (tmp_path / "big").resolve() and (tmp_path / "big").is_dir()

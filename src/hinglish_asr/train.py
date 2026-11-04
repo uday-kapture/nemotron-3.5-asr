@@ -42,9 +42,12 @@ import argparse
 import copy
 import json
 import math
+import os
+import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -416,6 +419,20 @@ def fit(cfg: dict, name: str, stage: str, parent_run_id: str | None = None) -> d
     return result
 
 
+def big_tmpdir(run_root: Path) -> Path:
+    """Temp files go to $TMPDIR, or <run_root>/tmp when it is unset; created if missing.
+
+    Lightning writes each checkpoint to a temp file before moving it into place
+    and NeMo unpacks a .nemo into one: a checkpoint with optimizer state is
+    ~8 GB, more than a small /tmp holds (ENOSPC at the first -last save).
+    """
+    tmp = Path(os.environ.get("TMPDIR") or (run_root / "tmp")).resolve()
+    tmp.mkdir(parents=True, exist_ok=True)  # a missing TMPDIR would silently fall back to /tmp
+    os.environ["TMPDIR"] = str(tmp)  # dataloader workers and other children too
+    tempfile.tempdir = None  # gettempdir() caches its first answer
+    return tmp
+
+
 def _fit(cfg: dict, name: str, stage: str, parent_run_id: str | None, callbacks: list) -> dict:
     import lightning.pytorch as pl
     from nemo.collections.asr.models import ASRModel
@@ -426,6 +443,7 @@ def _fit(cfg: dict, name: str, stage: str, parent_run_id: str | None, callbacks:
 
     run_dir = Path(cfg["run_root"]) / name
     run_dir.mkdir(parents=True, exist_ok=True)
+    big_tmpdir(Path(cfg["run_root"]))
     # exp_manager moves every loose file in run_dir into run_<n>/ (keeping the
     # previous attempt's logs), so this run's files are read before it and
     # written after it.
@@ -518,17 +536,40 @@ def _child(args, name: str, stage: str, arm: str | None, sets: list[str], parent
     log = run_root / "logs" / f"{name}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     print(f"{name}: running, log in {log}", file=sys.stderr)
+    started = time.time()
     with log.open("w") as fh:
         returncode = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT).returncode
+    exit_text = f"killed by {signal.Signals(-returncode).name}" if returncode < 0 else f"exit code {returncode}"
+    result = run_dir / "result.json"
+    # result.json is the run's last step: a fresh one means it finished, even if
+    # the process then crashed on the way out (CUDA graphs, dataloader workers).
+    if result.exists() and result.stat().st_mtime >= started:
+        if returncode != 0:
+            print(f"{name}: finished, then the process ended with {exit_text}; keeping its result\n  full log: {log}",
+                  file=sys.stderr)
+        return {"status": "ok", **json.loads(result.read_text()), "returncode": returncode}
     if returncode < 0 and stage != "pilot":  # killed by a signal: the run could not post its own error
         from . import notify
 
         notify.GChat.from_env(thread=name).send(notify.killed_text(name, signal.Signals(-returncode).name))
-    if returncode == 0 and (run_dir / "result.json").exists():
-        return {"status": "ok", **json.loads((run_dir / "result.json").read_text())}
     tail = log.read_text(errors="replace")[-4000:]
     status = "oom" if "out of memory" in tail.lower() else "failed"
-    return {"status": status, "name": name, "log_tail": tail[-500:]}
+    error = last_error(tail)
+    print(f"{name}: {status} ({exit_text}): {error}\n  full log: {log}", file=sys.stderr)
+    return {"status": status, "name": name, "returncode": returncode, "error": error, "log": str(log),
+            "log_tail": tail[-500:]}
+
+
+_ERROR_LINE = re.compile(r"\b\w*(Error|Exception|Interrupt)\b.*:|^error\b", re.IGNORECASE)
+
+
+def last_error(log_tail: str) -> str:
+    """The line naming what went wrong at the end of a log ("KeyError: 'x'"), else its last line."""
+    lines = [line.strip() for line in log_tail.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if _ERROR_LINE.search(line):
+            return line[:300]
+    return lines[-1][:300] if lines else "(empty log)"
 
 
 def pilot(args) -> dict:
@@ -546,8 +587,10 @@ def pilot(args) -> dict:
             "trainer.limit_val_batches=0",
             "trainer.num_sanity_val_steps=0",
         ]
-        r = _child(args, f"pilot-bd{bd}", "pilot", args.arm, sets, None)
+        r = _child(args, f"pilot-bd{bd:g}", "pilot", args.arm, sets, None)
         row = {"batch_duration": bd, "status": r["status"], **r.get("throughput", {})}
+        if r["status"] != "ok":
+            row.update(returncode=r["returncode"], error=r["error"], log=r["log"])
         results.append(row)
         print(json.dumps(row), file=sys.stderr)
     best = pick_batch_duration(results, args.memory_fraction)

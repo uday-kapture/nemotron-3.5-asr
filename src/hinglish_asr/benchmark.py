@@ -249,6 +249,9 @@ def main(argv: list[str] | None = None) -> dict:
 
     run_dir = Path(args.run)
     run_cfg = yaml.safe_load((run_dir / "config.yaml").read_text())
+    from .train import big_tmpdir
+
+    big_tmpdir(run_dir.parent)  # .nemo unpacking and winner.nemo packing, ~2.4 GB each
     push_to = hub_target(run_dir, run_cfg) if args.push_winner else None
     if args.push_winner and push_to is None:  # before hours of decoding, not after
         sys.exit(f"--push-winner needs checkpoint_hub_repo in {run_dir / 'config.yaml'}")
