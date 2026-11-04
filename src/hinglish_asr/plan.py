@@ -68,7 +68,11 @@ def repo_sizes(repo: str, revision: str, subsets: list[str]) -> dict[str, int]:
 
 
 def config_sha(cfg: dict) -> str:
-    return hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest()[:12]
+    """Hash of what decides how a file is converted. `max_vendor_hours` only
+    decides how many files: a bigger plan starts with the same files, so
+    `convert` keeps the ones it already made."""
+    kept = {k: v for k, v in cfg.items() if k != "max_vendor_hours"}
+    return hashlib.sha256(json.dumps(kept, sort_keys=True).encode()).hexdigest()[:12]
 
 
 def main(argv: list[str] | None = None) -> dict:

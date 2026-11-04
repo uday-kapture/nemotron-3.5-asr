@@ -10,7 +10,12 @@ revision: 3e812ecb20f11e074f5d7116a44e752b373cde5e
 # Files: every file of these subsets whose stats list rows from `vendor`.
 subsets: [combined, inhouse-asr-2]
 vendor: deepgram_nova-3          # vendor key in stats/*.json
-max_vendor_hours: null           # cap on the vendor hours the stats report; null = all (~2,958 h, 529 GB)
+# Cap on the vendor hours the stats report; null = all (~2,958 h, 529 GB, ~1,900 h
+# kept). 800 = the first 577 planned files, ~140 GB to download, ~500 h kept once
+# en and empty rows are dropped (estimated from per-file language shares).
+# To grow it: raise the cap, rerun plan, rerun convert on the same --out; the
+# cap is not in config_sha, so converted files are kept and only new ones run.
+max_vendor_hours: 800
 plan_seed: calls-v1              # file order; any prefix of the plan is a spread-out sample
 
 # Rows

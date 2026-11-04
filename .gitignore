@@ -8,3 +8,6 @@ mlruns/
 models/
 runs/
 mlflow.db
+
+# personal Claude Code settings
+.claude

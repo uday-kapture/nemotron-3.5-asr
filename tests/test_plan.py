@@ -2,7 +2,7 @@ import json
 
 import yaml
 
-from hinglish_asr.plan import main, plan_files
+from hinglish_asr.plan import config_sha, main, plan_files
 
 
 def _stats():
@@ -60,3 +60,12 @@ def test_cli_embeds_config(tmp_path):
     assert saved == plan
     assert saved["config"] == cfg
     assert saved["totals"]["files"] == 10 and saved["totals"]["vendor_hours"] == 10.0
+
+
+def test_raising_the_hours_cap_keeps_the_config_hash_and_extends_the_plan():
+    kw = dict(subsets=["combined"], vendor="deepgram_nova-3", seed="s")
+    small, big = plan_files(_stats(), max_vendor_hours=3.0, **kw), plan_files(_stats(), **kw)
+    assert big[: len(small)] == small
+    cfg = {"plan_seed": "s", "min_confidence": 0.0, "max_vendor_hours": 800}
+    assert config_sha(cfg) == config_sha({**cfg, "max_vendor_hours": None})
+    assert config_sha(cfg) != config_sha({**cfg, "min_confidence": 0.5})

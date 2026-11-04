@@ -152,10 +152,13 @@ uv run python -m hinglish_asr.benchmark --run runs/calls-v1 \
 At the pinned revision, 2,170 files hold 2,958 Deepgram hours; each file is
 ~25% Deepgram, so taking all of it downloads 529 GB. About a fifth of the
 Deepgram rows are empty "unintelligible" chunks and are dropped, leaving
-~2,300 h, before keeping only the rows Deepgram labelled `hi`
-(`languages: [hi]`: the model is tuned for the hi-IN prompt, and Deepgram's
-English model on Hindi speech writes romanized Hindi). The plan's vendor hours
-include the `en` rows; `report.json` has the hours actually kept.
+~2,300 h; keeping only the rows Deepgram labelled `hi` (`languages: [hi]`:
+the model is tuned for the hi-IN prompt, and Deepgram's English model on Hindi
+speech writes romanized Hindi) leaves an estimated ~1,900 h. The stats count
+language per file, not per vendor, so that is an estimate; the plan's vendor
+hours include the `en` rows, and `report.json` has the hours actually kept.
+The config starts smaller: `max_vendor_hours: 800` takes the first 577
+planned files (~140 GB to download) for ~500 h kept.
 `numbers_to_digits: true` rewrites number words as digits in every split
 (`दो सौ पचास रुपये` → `250 रुपये`, `नौ आठ सात छह` → `9876`). A lone number
 below 10 (`दो दिन`, `कर दो`), a short range (`एक दो दिन`), a fraction
@@ -172,6 +175,12 @@ calls, so the agent side of val and test is speech the model trained on.
 `test_clients` holds whole clients out of every other split
 (`client_test_manifest.jsonl`), and with them their agents; pick them from
 `report.json`'s `splits.train.top_clients` after the trial run.
+
+To grow the data, raise `max_vendor_hours` (or set it to null), rerun `plan`,
+and rerun `convert` on the same `--out`: a bigger plan starts with the same
+files, and the cap is left out of the config hash, so only the new files are
+converted. Then rerun `input_cfg`. val and test grow too, so compare an older
+model with a newer one by benchmarking both on the new test split.
 
 Reruns skip finished files (`done/<k>.json`). A done file records the
 config's hash, so after changing the config (and rerunning `plan`) convert
