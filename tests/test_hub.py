@@ -74,3 +74,16 @@ def test_reuploading_a_name_does_not_take_two_top_k_slots(tmp_path):
     hub.add(local, _ck(2000, 0.25))
     assert hub.add(local, _ck(2000, 0.25))  # the same validation again, after a resume
     assert [n for n, _ in hub.list()] == [_ck(2000, 0.25), _ck(1000, 0.30)]
+
+
+def test_pushed_run_files_are_never_ranked_or_deleted_as_checkpoints(tmp_path):
+    hub_api = FakeModelRepo()
+    hub = HubCheckpoints("org/ckpts", "calls-v1", keep=1, api=hub_api)
+    local = tmp_path / "w.ckpt"
+    local.write_bytes(b"weights")
+    hub.add(local, _ck(1000, 0.30))
+    hub.push({"winner.nemo": local, "benchmark/benchmark.md": local}, "benchmark")
+    hub.add(local, _ck(2000, 0.20))  # replaces the 0.30 checkpoint only
+    assert hub.list() == [(_ck(2000, 0.20), 0.20)]
+    assert hub_api.files == {f"runs/calls-v1/{_ck(2000, 0.20)}", "runs/calls-v1/winner.nemo",
+                             "runs/calls-v1/benchmark/benchmark.md"}

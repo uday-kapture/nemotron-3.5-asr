@@ -75,9 +75,11 @@ notify:
   every_n_steps: 500             # progress message; 0 = epochs and errors only
 
 # Private HF model repo for the top-k checkpoints (weights only, ~2.4 GB each,
-# under runs/<name>/). Set it on a box short on disk: nothing but the -last
-# checkpoint (~8 GB, for resuming) is then kept locally. null = all local.
-checkpoint_hub_repo: null
+# under runs/<name>/): nothing but the -last checkpoint (~8 GB, for resuming) is
+# kept locally. `benchmark --push-winner` adds runs/<name>/winner.nemo and the
+# report. Created private on first use; the HF token needs write access to it.
+# null = all checkpoints local.
+checkpoint_hub_repo: kapturecx/nemotron-3.5-fine-tune
 
 checkpoint:
   monitor: val_wer

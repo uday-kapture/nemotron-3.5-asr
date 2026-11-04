@@ -11,3 +11,6 @@ mlflow.db
 
 # personal Claude Code settings
 .claude
+
+# secrets for the training box; .env.example is the template
+.env

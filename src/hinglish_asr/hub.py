@@ -9,6 +9,8 @@ Checkpoints of run <name> live under runs/<name>/ in a model repo, as weights
 only ({"state_dict", "global_step"}, ~2.4 GB instead of ~8 GB with optimizer
 state). Each upload is one commit that also deletes whatever falls out of the
 top k, so the repo always holds the k best by the val_wer in the file name.
+`benchmark --push-winner` adds the chosen model and its report next to them:
+runs/<name>/winner.nemo and runs/<name>/benchmark/benchmark.{md,json}.
 """
 
 from __future__ import annotations
@@ -70,6 +72,14 @@ class HubCheckpoints:
         ops += [CommitOperationDelete(f"{self.prefix}/{n}") for n, _ in existing if n not in keep]
         self.api.create_commit(self.repo, operations=ops, repo_type="model", commit_message=f"{self.run}: {name}")
         return True
+
+    def push(self, files: dict[str, str | Path], message: str) -> None:
+        """Upload other files of the run (the benchmark's winner.nemo, report) under runs/<run>/, one commit.
+
+        Their names carry no val_wer, so `list` and `add` never rank or delete them.
+        """
+        ops = [CommitOperationAdd(f"{self.prefix}/{name}", str(path)) for name, path in files.items()]
+        self.api.create_commit(self.repo, operations=ops, repo_type="model", commit_message=message)
 
     def download(self, name: str, cache_dir: str | Path) -> Path:
         from huggingface_hub import hf_hub_download

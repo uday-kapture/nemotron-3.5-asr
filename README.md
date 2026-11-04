@@ -121,16 +121,18 @@ is trained and judged at the deployment setting: 80 ms lookahead
 
 ```bash
 uv sync --extra nemo --extra mlflow --extra semantic
-export MLFLOW_TRACKING_URI=...               # required; see "MLflow" below
-scripts/fetch_inputs.sh                      # checks dataset access, fetches models/base/*.nemo
+cp .env.example .env && chmod 600 .env       # fill in MLflow (required), HF token, Chat webhook; git-ignored
+source .env                                  # in every new shell / tmux window
+uv run hf auth login                         # unless HF_TOKEN is in .env: read kapturecx/bolAIndia, write the checkpoint repo
+scripts/fetch_inputs.sh                      # checks dataset read, checkpoint repo write, MLflow; fetches models/base/*.nemo
 
 # 1. plan: which files hold Deepgram rows, from the dataset's stats only
 uv run python -m hinglish_asr.plan --config configs/data/calls_deepgram.yaml --out /data/calls/plan.json
 
 # 2. convert: download each file whole, keep Deepgram rows, write tar shards + held-out manifests
-HF_XET_HIGH_PERFORMANCE=1 uv run python -m hinglish_asr.convert \
+uv run python -m hinglish_asr.convert \
     --plan /data/calls/plan.json --out /data/calls --limit-files 3      # look at report.json first
-HF_XET_HIGH_PERFORMANCE=1 uv run python -m hinglish_asr.convert --plan /data/calls/plan.json --out /data/calls
+uv run python -m hinglish_asr.convert --plan /data/calls/plan.json --out /data/calls   # HF_XET_HIGH_PERFORMANCE from .env
 #   short on disk: add --upload-to kapturecx/<private-shard-repo> to stream the training tars instead
 
 # 3. blend
@@ -142,8 +144,9 @@ uv run python -m hinglish_asr.train sweep --arms noam cosine --set model.train_d
 uv run python -m hinglish_asr.train run --arm cosine --name calls-v1 \
     --set model.train_ds.batch_duration=500 --set trainer.max_steps=<from runs/pilot.json>
 
-# 7. benchmark the checkpoints: choose on val, report on test (and held-out clients)
-uv run python -m hinglish_asr.benchmark --run runs/calls-v1 \
+# 7. benchmark the checkpoints: choose on val, report on test (and held-out clients);
+#    --push-winner puts winner.nemo and the report in runs/calls-v1/ of the checkpoint repo
+uv run python -m hinglish_asr.benchmark --run runs/calls-v1 --push-winner \
     --val /data/calls/val_manifest.jsonl --test /data/calls/test_manifest.jsonl \
     --client-test /data/calls/client_test_manifest.jsonl     # if test_clients is set
 ```
@@ -240,8 +243,9 @@ annealing to `min_lr` within the sweep. Child runs log to
 `runs/logs/<name>.log`. Rerunning the same `--name` resumes from its last
 checkpoint.
 
-**Checkpoints on the Hub** (`checkpoint_hub_repo` in `configs/train.yaml`).
-Set it to a private HF model repo and the top-k checkpoints are never
+**Checkpoints on the Hub** (`checkpoint_hub_repo` in `configs/train.yaml`,
+set to `kapturecx/nemotron-3.5-fine-tune`; `null` keeps everything local).
+With a private HF model repo there, the top-k checkpoints are never
 written locally. Each goes straight to `runs/<name>/` in the repo as weights
 only, about 2.4 GB instead of 8 GB with optimizer state, and the same commit
 deletes whatever falls out of the top 5. Only the `-last` checkpoint (about
@@ -251,7 +255,10 @@ the benchmark writes `winner.nemo`. The benchmark reads `checkpoint_hub.json`
 in the run directory. It downloads each candidate once, loads it, deletes it,
 and builds the top-k average while they load. An upload happens at each
 validation (every 1,000 steps) and blocks training for as long as 2.4 GB
-takes to upload.
+takes to upload. The pilot uploads nothing; each sweep arm uploads its own
+`runs/<sweep>-<arm>/`. `benchmark --push-winner` adds `runs/<name>/winner.nemo`
+(unless the base model won) and `runs/<name>/benchmark/benchmark.{md,json}`;
+those names carry no `val_wer`, so the top-k trimming never touches them.
 
 **Benchmark** (`benchmark.py`, `semantic.py`).
 - **Candidates:** the base model, the top-k checkpoints, the last checkpoint,

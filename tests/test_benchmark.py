@@ -1,6 +1,10 @@
+import json
+
 import pytest
 
-from hinglish_asr.benchmark import breakdown, choose, duration_bucket, evaluate, find_checkpoints, render_markdown
+from hinglish_asr.benchmark import (
+    breakdown, choose, duration_bucket, evaluate, find_checkpoints, hub_target, push_results, render_markdown,
+)
 
 
 def test_find_checkpoints_orders_topk_by_val_wer_and_finds_last(tmp_path):
@@ -71,3 +75,23 @@ def test_markdown_reports_held_out_clients_when_given():
     section = md.split("## Held-out clients (reported once)")[1]
     assert "| base | 40.00% |" in section and "| top1 | 20.00% | -20.00 [-25.00, -15.00]" in section
     assert "client_test: `ct` (3 utterances, 0.50 h)" in md
+
+
+def test_uploads_go_where_the_run_checkpoints_went(tmp_path):
+    assert hub_target(tmp_path, {"checkpoint_hub_repo": None}) is None
+    assert hub_target(tmp_path / "calls-v1", {"checkpoint_hub_repo": "org/ft"}) == ("org/ft", "calls-v1")
+    (tmp_path / "checkpoint_hub.json").write_text(json.dumps({"repo": "org/ckpts", "run": "calls-v1"}))
+    assert hub_target(tmp_path, {"checkpoint_hub_repo": "org/ft"}) == ("org/ckpts", "calls-v1")
+
+
+def test_push_results_uploads_the_winner_and_report_but_not_a_base_winner(tmp_path):
+    from test_hub import FakeModelRepo
+
+    for name in ("benchmark.md", "benchmark.json", "winner.nemo"):
+        (tmp_path / name).write_text("x")
+    api = FakeModelRepo()
+    assert push_results(("org/ft", "calls-v1"), tmp_path, "step=3000", api=api) == [
+        "benchmark/benchmark.json", "benchmark/benchmark.md", "winner.nemo"]
+    assert "runs/calls-v1/winner.nemo" in api.files
+    assert push_results(("org/ft", "calls-v2"), tmp_path, "base", api=api) == [
+        "benchmark/benchmark.json", "benchmark/benchmark.md"]

@@ -30,6 +30,8 @@ Writes <run>/benchmark/: benchmark.json, benchmark.md, winner.nemo and, kept
 on the box because they hold call transcripts, predictions/*.jsonl and
 cross_script_pairs.json (the cross-script matches to audit). MLflow gets one
 nested run per candidate under the training run, metrics only.
+--push-winner uploads winner.nemo, benchmark.md and benchmark.json to the
+run's folder in its private checkpoint repo (`checkpoint_hub_repo`).
 """
 
 from __future__ import annotations
@@ -236,6 +238,8 @@ def main(argv: list[str] | None = None) -> dict:
     p.add_argument("--limit", type=int, help="only the first N rows of each split (smoke test)")
     p.add_argument("--no-mlflow", action="store_true")
     p.add_argument("--log-model", action="store_true", help="upload winner.nemo to the training run in MLflow")
+    p.add_argument("--push-winner", action="store_true",
+                   help="upload winner.nemo and the report to runs/<name>/ in the run's checkpoint_hub_repo")
     args = p.parse_args(argv)
 
     import torch
@@ -245,6 +249,9 @@ def main(argv: list[str] | None = None) -> dict:
 
     run_dir = Path(args.run)
     run_cfg = yaml.safe_load((run_dir / "config.yaml").read_text())
+    push_to = hub_target(run_dir, run_cfg) if args.push_winner else None
+    if args.push_winner and push_to is None:  # before hours of decoding, not after
+        sys.exit(f"--push-winner needs checkpoint_hub_repo in {run_dir / 'config.yaml'}")
     base = args.base or run_cfg["base_model"]
     out_dir = run_dir / "benchmark"
     (out_dir / "predictions").mkdir(parents=True, exist_ok=True)
@@ -399,7 +406,32 @@ def main(argv: list[str] | None = None) -> dict:
 
     if not args.no_mlflow:
         _log_mlflow(run_dir, run_cfg, result, out_dir, args.log_model and winner != "base")
+    if push_to:
+        push_results(push_to, out_dir, winner)
     return result
+
+
+def hub_target(run_dir: Path, run_cfg: dict) -> tuple[str, str] | None:
+    """(repo, run) for the run's uploads: where its checkpoints went, else its config's checkpoint_hub_repo."""
+    info = run_dir / "checkpoint_hub.json"
+    if info.exists():
+        hub = json.loads(info.read_text())
+        return hub["repo"], hub["run"]
+    repo = run_cfg.get("checkpoint_hub_repo")
+    return (repo, run_dir.name) if repo else None
+
+
+def push_results(target: tuple[str, str], out_dir: Path, winner: str, api=None) -> list[str]:
+    """winner.nemo (unless the base model won) and the report, in one commit; predictions stay on the box."""
+    from .hub import HubCheckpoints
+
+    repo, run = target
+    files = {f"benchmark/{n}": out_dir / n for n in ("benchmark.md", "benchmark.json")}
+    if winner != "base":
+        files["winner.nemo"] = out_dir / "winner.nemo"
+    HubCheckpoints(repo, run, api=api).push(files, f"{run}: benchmark, winner {winner}")
+    print(f"pushed {', '.join(sorted(files))} to {repo}/runs/{run}/", file=sys.stderr)
+    return sorted(files)
 
 
 def _flat_metrics(scores: dict) -> dict:
