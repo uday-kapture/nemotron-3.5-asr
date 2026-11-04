@@ -29,7 +29,8 @@ def test_repo_config_resolves_for_every_arm():
         cfg = load_config(CONFIG, arm)
         assert cfg["arm"] == arm
         assert cfg["model"]["att_context_size"] == [56, 0]
-        assert cfg["model"]["validation_ds"]["default_prompt_mode"] == "auto"
+        assert cfg["model"]["validation_ds"]["default_prompt_mode"] == "langID"  # the rows' hi-IN
+        assert cfg["model"]["train_ds"]["default_prompt_mode"] == "langID"
         assert resolve_optim(cfg["model"]["optim"])["lr"] > 0
         assert sum(context_probs(TRAINED, cfg["model"]["att_context_probs"])) == pytest.approx(1.0)
         assert "arms" not in cfg

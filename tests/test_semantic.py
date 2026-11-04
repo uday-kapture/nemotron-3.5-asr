@@ -95,6 +95,8 @@ def test_digit_strings_keep_leading_zeros_and_join_groups(words, value):
 
 def test_switching_between_digits_and_number_words_starts_a_new_number():
     assert [c for c, _ in canonical_tokens("1 000 दो".split())] == ["#1000", "#2"]
+    # after a multiplier the number goes on
+    assert [c for c, _ in canonical_tokens("दो लाख 50 हज़ार".split())] == ["#250000"]
 
 
 @pytest.mark.parametrize(

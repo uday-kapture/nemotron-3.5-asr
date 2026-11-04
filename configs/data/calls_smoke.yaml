@@ -12,11 +12,12 @@ max_vendor_hours: 8
 plan_seed: calls-v1
 
 provider: deepgram
-languages: [hi, en]
+languages: [hi]
 min_duration: 0.1
 max_duration: 20.0
 min_confidence: 0.0
 channels: null
+numbers_to_digits: true
 
 val_frac: 0.05
 test_frac: 0.05

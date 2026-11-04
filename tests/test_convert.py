@@ -307,3 +307,19 @@ def test_heldout_ids_repeated_across_files_are_dropped(tmp_path):
     report = convert(plan, out, workers=1, local_root=str(root))
     assert sorted(r["id"] for r in _jsonl(out / "test_manifest.jsonl")) == ["chunk_0000", "chunk_0001", "chunk_0003", "chunk_0004"]
     assert report["heldout_id_clashes_dropped"] == 2
+
+
+def test_numbers_to_digits_rewrites_every_split_and_is_reported(tmp_path):
+    root = tmp_path / "repo"
+    rows = [_row(i, f"cust{i % 12}", text="दो सौ पचास रुपये कर दो") for i in range(24)]
+    _parquet(root / "data/combined/f0.parquet", rows)
+    cfg = {**CFG, "numbers_to_digits": True}
+    plan = {"config": cfg, "config_sha": "n", "files": [{"index": 0, "path": "data/combined/f0.parquet"}]}
+    out = tmp_path / "out"
+    report = convert(plan, out, workers=1, local_root=str(root))
+
+    texts = {r["text"] for r in _jsonl(out / "train/sharded_manifests/manifest_0.json")}
+    texts |= {r["text"] for split in ("val", "test") for r in _jsonl(out / f"{split}_manifest.jsonl")}
+    assert texts == {"250 रुपये कर दो"}
+    assert report["numbers_to_digits"]["rows"] == 24
+    assert report["numbers_to_digits"]["examples"][0] == ["दो सौ पचास रुपये कर दो", "250 रुपये कर दो"]

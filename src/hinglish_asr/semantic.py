@@ -200,6 +200,11 @@ def _run_value(run: list[tuple[str, float, str | None]]) -> str:
     in phone numbers (शून्य नौ आठ = 098). Adjacent digit strings join as text:
     scoring turns "1,50,000" into "1 50 000" and "0987" keeps its zero.
     """
+    return "".join(run_pieces(run)) or "0"
+
+
+def run_pieces(run: list[tuple[str, float, str | None]]) -> list[str]:
+    """The numbers a run is read as, in order; `_run_value` joins them."""
     pieces: list[str] = []
     total, cur, text, mod = 0.0, None, None, 0.0
 
@@ -230,27 +235,25 @@ def _run_value(run: list[tuple[str, float, str | None]]) -> str:
             cur, text = None, None
     if cur is not None or total:
         pieces.append(piece())
-    return "".join(pieces) or "0"
+    return pieces
 
 
 def canonical_tokens(tokens: list[str]) -> list[tuple[str, str]]:
     """(canonical, surface) pairs; a run of number words/digits becomes one token.
 
-    A switch between digits and number words starts a new run: "1,000 दो"
-    (give 1,000) is 1000 and 2, not 10002.
+    A number right after a number in the other form starts a new run: "1,000
+    दो" (give 1,000) is 1000 and 2, not 10002. After a multiplier the run goes
+    on: "दो लाख 50 हज़ार" is 250000.
     """
     out: list[tuple[str, str]] = []
     run: list[tuple[str, float, str | None]] = []
     surface: list[str] = []
-    last_digits: bool | None = None
 
     def flush():
-        nonlocal last_digits
         if run:
             out.append(("#" + _run_value(run), " ".join(surface)))
             run.clear()
             surface.clear()
-        last_digits = None
 
     for tok in tokens:
         num = _number_token(tok)
@@ -258,15 +261,17 @@ def canonical_tokens(tokens: list[str]) -> list[tuple[str, str]]:
             flush()
             out.append((tok, tok))
             continue
-        if num[0] == "num":
-            is_digits = num[2] is not None
-            if last_digits is not None and is_digits != last_digits:
-                flush()
-            last_digits = is_digits
+        if run and form_switch(run[-1], num):
+            flush()
         run.append(num)
         surface.append(tok)
     flush()
     return out
+
+
+def form_switch(prev: tuple[str, float, str | None], num: tuple[str, float, str | None]) -> bool:
+    """`num` follows number `prev` in the other form (digits vs words), so it starts a new number."""
+    return prev[0] == num[0] == "num" and (prev[2] is None) != (num[2] is None)
 
 
 # ---------- alignment ----------

@@ -71,6 +71,7 @@ from .bolai import COLUMNS, TARGET_LANG, RowFilter, customer_key
 from .hub import ensure_private_repo
 from .scoring import script_of
 from .split import assign_split
+from .itn import numbers_to_digits
 from .textnorm import normalize_target
 
 SAMPLE_RATE = 16000
@@ -108,7 +109,9 @@ def convert_file(job: _Job) -> dict:
     test_clients = {str(c) for c in cfg.get("test_clients") or ()}
     dropped, kept, seconds = Counter(), Counter(), Counter()
     train, held, ids = [], [], set()
-    rows = text_changed = 0
+    rows = text_changed = numbers_changed = 0
+    number_examples: list[tuple[str, str]] = []
+    digits = bool(cfg.get("numbers_to_digits"))
     try:
         pf = pq.ParquetFile(src)
         names = [c for c in COLUMNS if c in pf.schema_arrow.names]
@@ -122,7 +125,9 @@ def convert_file(job: _Job) -> dict:
                 if reason:
                     dropped[reason] += 1
                     continue
-                text = normalize_target(row["text"])
+                text = written = normalize_target(row["text"])
+                if digits:
+                    text = numbers_to_digits(written)
                 if not text:
                     dropped["empty_text"] += 1
                     continue
@@ -172,6 +177,10 @@ def convert_file(job: _Job) -> dict:
                     "confidence": None if conf is None else round(conf, 4),
                 }
                 text_changed += text != row["text"]
+                if text != written:
+                    numbers_changed += 1
+                    if len(number_examples) < 20:
+                        number_examples.append((written, text))
                 kept[split] += 1
                 seconds[split] += info.duration
                 if split == "train":
@@ -213,6 +222,8 @@ def convert_file(job: _Job) -> dict:
         "hours": {s: v / 3600 for s, v in seconds.items()},
         "dropped": dict(dropped),
         "text_changed_by_normalization": text_changed,
+        "numbers_to_digits": numbers_changed,
+        "number_examples": number_examples,
         "bytes": size,
         "elapsed_s": round(time.perf_counter() - t0, 1),
     }
@@ -419,6 +430,10 @@ def finalize(out: str | Path, plan: dict, files: list[dict]) -> dict:
         "heldout_hours_by_language": {k: round(v / 3600, 3) for k, v in by_language.items()},
         "heldout_hours_by_channel": {str(k): round(v / 3600, 3) for k, v in by_channel.items()},
         "text_changed_by_normalization": sum(d["text_changed_by_normalization"] for d in done.values()),
+        "numbers_to_digits": {
+            "rows": sum(d.get("numbers_to_digits", 0) for d in done.values()),
+            "examples": [e for d in done.values() for e in d.get("number_examples", [])][:100],
+        },
         "downloaded_gb": round(sum(d["bytes"] for d in done.values()) / 1e9, 2),
     }
     (out / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

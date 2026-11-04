@@ -10,7 +10,7 @@ mlflow:
   experiment: hinglish-asr-calls
 
 data:
-  input_cfg: configs/input_cfg.yaml                   # hinglish_asr.input_cfg --entry /data/calls/train:1.0:auto
+  input_cfg: configs/input_cfg.yaml                   # hinglish_asr.input_cfg --entry /data/calls/train:1.0:langID
   val_manifest: /data/calls/val_small_manifest.jsonl  # 3 h, customer-disjoint from train
   report: /data/calls/report.json                     # convert's report; `pilot` reads train hours from it
 
@@ -41,12 +41,12 @@ model:
     min_duration: 0.1
     num_workers: 8
     pin_memory: true
-    default_prompt_mode: auto    # input_cfg tags every source auto too
+    default_prompt_mode: langID  # the row's lang (hi-IN): the deployment prompt; input_cfg tags langID too
   validation_ds:
     use_lhotse: true
     batch_size: 32
     num_workers: 4
-    default_prompt_mode: auto    # NVIDIA's config leaves this unset (random auto/langID)
+    default_prompt_mode: langID  # NVIDIA's config leaves this unset (random auto/langID)
   optim:
     name: adamw
     betas: [0.9, 0.98]

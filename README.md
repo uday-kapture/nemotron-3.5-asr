@@ -117,7 +117,7 @@ Everything below runs on the GPU box. Training text is Kapture call chunks
 from the gated `kapturecx/bolAIndia` whose transcript came from Deepgram
 nova-3, the only vendor that writes English words in Latin script. The model
 is trained and judged at the deployment setting: 80 ms lookahead
-(`att_context_size [56,0]`) and the `auto` prompt.
+(`att_context_size [56,0]`) and the `hi-IN` prompt.
 
 ```bash
 uv sync --extra nemo --extra mlflow --extra semantic
@@ -134,7 +134,7 @@ HF_XET_HIGH_PERFORMANCE=1 uv run python -m hinglish_asr.convert --plan /data/cal
 #   short on disk: add --upload-to kapturecx/<private-shard-repo> to stream the training tars instead
 
 # 3. blend
-uv run python -m hinglish_asr.input_cfg --entry /data/calls/train:1.0:auto --out configs/input_cfg.yaml
+uv run python -m hinglish_asr.input_cfg --entry /data/calls/train:1.0:langID --out configs/input_cfg.yaml
 
 # 4. pilot: batch size, speed, max_steps   5. LR sweep   6. full run
 uv run python -m hinglish_asr.train pilot --arm cosine --batch-durations 300 400 500 600 --passes 3
@@ -152,7 +152,17 @@ uv run python -m hinglish_asr.benchmark --run runs/calls-v1 \
 At the pinned revision, 2,170 files hold 2,958 Deepgram hours; each file is
 ~25% Deepgram, so taking all of it downloads 529 GB. About a fifth of the
 Deepgram rows are empty "unintelligible" chunks and are dropped, leaving
-~2,300 h. The audio is already 16 kHz mono FLAC chunks, so the converter
+~2,300 h, before keeping only the rows Deepgram labelled `hi`
+(`languages: [hi]`: the model is tuned for the hi-IN prompt, and Deepgram's
+English model on Hindi speech writes romanized Hindi). The plan's vendor hours
+include the `en` rows; `report.json` has the hours actually kept.
+`numbers_to_digits: true` rewrites number words as digits in every split
+(`दो सौ पचास रुपये` → `250 रुपये`, `नौ आठ सात छह` → `9876`). A lone number
+below 10 (`दो दिन`, `कर दो`), a short range (`एक दो दिन`), a fraction
+(`साढ़े तीन बजे`) and a sentence-final `दो` after `सौ`/`हज़ार` (`पांच सौ दो`,
+"give 500") stay as words; see `itn.py`. `report.json`'s `numbers_to_digits`
+counts the rows changed and lists examples to check.
+The audio is already 16 kHz mono FLAC chunks, so the converter
 copies the bytes into `train/audio_<k>.tar` (about 105 GB in total) without
 resampling. Rows are split by customer: the phone hash of the called party
 on outbound calls, the caller on inbound ones. 1% of customers each go to
@@ -198,7 +208,7 @@ client, and Deepgram confidence quantiles. Use the quantiles to set
 
 **Training** (`train.py`, `configs/train.yaml`) follows NeMo's
 `speech_to_text_finetune.py`. It adds:
-- validation at 80 ms with the auto prompt; `val_wer` scores the
+- validation at 80 ms with the hi-IN prompt; `val_wer` scores the
   benchmark's normalization (tags, case, punctuation), so the top-k it keeps
   are the ones the benchmark would rank best;
 - lookahead sampling weighted to 80 ms (`att_context_probs`; NeMo's default
@@ -237,7 +247,7 @@ takes to upload.
 **Benchmark** (`benchmark.py`, `semantic.py`).
 - **Candidates:** the base model, the top-k checkpoints, the last checkpoint,
   and the average of the top-k weights. Each is decoded on the full val split
-  at 80 ms with `auto`.
+  at 80 ms with `hi-IN`.
 - **Choosing:** lowest val WER wins. Test (and `--client-test`) is decoded only
   for the winner and the base model.
 - **Metrics:**

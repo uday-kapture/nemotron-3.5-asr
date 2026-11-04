@@ -9,7 +9,7 @@ average of the top-k weights. Top-k checkpoints come from <run>/checkpoints/,
 or, if the run wrote checkpoint_hub.json, from its private HF model repo: each
 is downloaded once, loaded, and deleted (the average is accumulated as they
 load). Each is decoded on the full val split at 80 ms
-with the `auto` prompt (offline decoding at that lookahead equals cache-aware
+with the `hi-IN` prompt (offline decoding at that lookahead equals cache-aware
 streaming; the winner is re-checked with the streaming loop on a sample). The
 winner has the lowest val WER. Test is decoded once, for the winner and the
 base model only, so it is never used to choose, and the gain over the base
@@ -49,7 +49,7 @@ from .scoring import error_rate, paired_bootstrap, score_corpus, utterance_error
 from .semantic import lenient_scores, semdist_summary
 
 DEPLOY_CONTEXT = [56, 0]
-DEPLOY_PROMPT = "auto"
+DEPLOY_PROMPT = "hi-IN"
 
 
 # ---------- candidates ----------

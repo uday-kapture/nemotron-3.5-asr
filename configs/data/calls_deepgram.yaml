@@ -15,13 +15,18 @@ plan_seed: calls-v1              # file order; any prefix of the plan is a sprea
 
 # Rows
 provider: deepgram               # `provider` column value
-languages: [hi, en]
+# hi only: the model is fine-tuned for the hi-IN prompt, and Deepgram's English
+# model on Hindi speech writes romanized Hindi. Vendor hours above include en.
+languages: [hi]
 min_duration: 0.1
 max_duration: 20.0               # the base model was pre-trained on <= 20 s
 # Deepgram utterance confidence of non-empty rows starts at ~0.5 (sampled
 # file: p5 0.59, p10 0.66). Set after reading the first convert report.
 min_confidence: 0.0
 channels: null                   # e.g. [right]; null = both sides of the call
+# Number words -> digits in every split's text (दो सौ पचास -> 250); see
+# hinglish_asr.itn for what stays as words.
+numbers_to_digits: true
 
 # Splits: hashed by customer (phone hash), so a customer never straddles splits.
 val_frac: 0.01

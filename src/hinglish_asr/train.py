@@ -16,7 +16,7 @@
 Follows NeMo's speech_to_text_finetune.py (restore the .nemo; set data,
 optimizer and SpecAugment from the config; fit) and adds what it leaves out:
 
-- validation at the deployment lookahead (80 ms) with the `auto` prompt, and
+- validation at the deployment lookahead (80 ms) with the `hi-IN` prompt, and
   val_wer on the benchmark's normalization (tags, case, punctuation);
 - `att_context_probs`: how often each trained lookahead is used per batch;
 - validation loss, top-k + last checkpoints by val_wer, one .nemo at the end;
