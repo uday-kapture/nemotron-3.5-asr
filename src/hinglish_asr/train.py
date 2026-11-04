@@ -26,7 +26,8 @@ optimizer and SpecAugment from the config; fit) and adds what it leaves out:
 Runs live in <run_root>/<name>/ (config.yaml, checkpoints/, mlflow_run_id,
 result.json); pilot and sweep write each child's output to
 <run_root>/logs/<name>.log. Rerunning the same name resumes from its last
-checkpoint.
+checkpoint; after running out of GPU or host memory, sweep (and `run
+--retries N`) does that itself while each attempt gets further.
 
 With `checkpoint_hub_repo` set, top-k checkpoints are never written locally:
 each goes straight to runs/<name>/ in that private HF model repo as weights
@@ -560,6 +561,40 @@ def _child(args, name: str, stage: str, arm: str | None, sets: list[str], parent
             "log_tail": tail[-500:]}
 
 
+def last_step(run_dir: Path) -> int | None:
+    """The step of the run's -last checkpoint, which a rerun resumes from; None before the first save."""
+    steps = [int(m.group(1)) for p in (run_dir / "checkpoints").glob("*-last.ckpt") if (m := re.search(r"step=(\d+)", p.name))]
+    return max(steps, default=None)
+
+
+def _child_resuming(args, name: str, stage: str, arm: str | None, sets: list[str], parent: str | None,
+                    retries: int) -> dict:
+    """_child, rerun up to `retries` times after running out of GPU or host memory.
+
+    Each rerun resumes from the -last checkpoint (at most limit_train_batches
+    steps back) and the data stream restarts its shuffle, so a rare too-big
+    batch is not met again at the same step. Gives up when an attempt dies at
+    the same checkpoint as the one before: that failure repeats. Each failed
+    attempt's log is kept as <name>.oom<n>.log.
+    """
+    run_dir = Path(load_config(args.config, arm, sets)["run_root"]) / name
+    failed_at = []
+    for attempt in range(retries + 1):
+        r = _child(args, name, stage, arm, sets, parent)
+        out_of_memory = r["status"] == "oom" or r.get("returncode") == -signal.SIGKILL  # the host's OOM killer
+        if r["status"] == "ok" or not out_of_memory or attempt == retries:
+            return r
+        step = last_step(run_dir)
+        if failed_at and failed_at[-1] == step:
+            print(f"{name}: out of memory again before passing step {step}; not retrying", file=sys.stderr)
+            return r
+        failed_at.append(step)
+        Path(r["log"]).rename(Path(r["log"]).with_suffix(f".oom{attempt + 1}.log"))
+        print(f"{name}: out of memory; retry {attempt + 1}/{retries} from step {step or 0}", file=sys.stderr)
+        time.sleep(30)  # let the driver and the page cache settle
+    return r
+
+
 _ERROR_LINE = re.compile(r"\b\w*(Error|Exception|Interrupt)\b.*:|^error\b", re.IGNORECASE)
 
 
@@ -641,7 +676,8 @@ def sweep(args) -> dict:
         sets.append(f"trainer.max_steps={args.steps}")
     with tracking.run(cfg["mlflow"]["experiment"], args.name, stage="sweep") as parent:
         tracking.log_params({"arms": args.arms, "overrides": args.set, "steps": args.steps, "schedule_steps": schedule_steps})
-        results = [_child(args, f"{args.name}-{arm}", "sweep", arm, sets, parent.info.run_id) for arm in args.arms]
+        results = [_child_resuming(args, f"{args.name}-{arm}", "sweep", arm, sets, parent.info.run_id, args.retries)
+                   for arm in args.arms]
         done = [r for r in results if r["status"] == "ok" and r.get("best_val_wer") is not None]
         winner = min(done, key=lambda r: r["best_val_wer"], default=None)
         out = {"results": results, "winner": winner and winner["arm"]}
@@ -680,6 +716,8 @@ def main(argv: list[str] | None = None):
     r.add_argument("--arm")
     r.add_argument("--stage", default="train", choices=["train", "sweep", "pilot"])
     r.add_argument("--parent-run-id")
+    r.add_argument("--retries", type=int, default=0,
+                   help="run in a child process (log in <run_root>/logs/<name>.log) and resume after out-of-memory up to N times")
 
     pl_ = sub.add_parser("pilot", help="short runs per batch_duration: speed, memory, max_steps")
     common(pl_)
@@ -697,8 +735,14 @@ def main(argv: list[str] | None = None):
     s.add_argument("--schedule-steps", type=int,
                    help="length of the full run's LR schedule, which each arm follows for --steps (default: pilot.json)")
     s.add_argument("--name", default="sweep")
+    s.add_argument("--retries", type=int, default=2, help="per arm: resume after out-of-memory up to N times")
 
     args = p.parse_args(argv)
+    if args.cmd == "run" and args.retries:
+        r = _child_resuming(args, args.name, args.stage, args.arm, args.set, args.parent_run_id, args.retries)
+        if r["status"] != "ok":
+            sys.exit(f"{args.name}: {r['status']}: {r['error']}")
+        return r
     if args.cmd == "run":
         return fit(load_config(args.config, args.arm, args.set), args.name, args.stage, args.parent_run_id)
     if args.cmd == "pilot":

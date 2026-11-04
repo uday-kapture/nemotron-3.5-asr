@@ -127,7 +127,7 @@ uv run hf auth login                         # unless HF_TOKEN is in .env: read 
 scripts/fetch_inputs.sh                      # checks dataset read, checkpoint repo write, MLflow; fetches models/base/*.nemo
 
 # 1. plan: which files hold Deepgram rows, from the dataset's stats only
-uv run python -m hinglish_asr.plan --config configs/data-g/uday/calls_deepgram.yaml --out /data-g/uday/calls/plan.json
+uv run python -m hinglish_asr.plan --config configs/data/calls_deepgram.yaml --out /data-g/uday/calls/plan.json
 
 # 2. convert: download each file whole, keep Deepgram rows, write tar shards + held-out manifests
 uv run python -m hinglish_asr.convert \
@@ -141,7 +141,7 @@ uv run python -m hinglish_asr.input_cfg --entry /data-g/uday/calls/train:1.0:lan
 # 4. pilot: batch size, speed, max_steps   5. LR sweep   6. full run
 uv run python -m hinglish_asr.train pilot --arm cosine --batch-durations 300 400 500 600 --passes 3
 uv run python -m hinglish_asr.train sweep --arms noam cosine --set model.train_ds.batch_duration=500
-uv run python -m hinglish_asr.train run --arm cosine --name calls-v1 \
+uv run python -m hinglish_asr.train run --arm cosine --name calls-v1 --retries 2 \
     --set model.train_ds.batch_duration=500 --set trainer.max_steps=<from runs/pilot.json>
 
 # 7. benchmark the checkpoints: choose on val, report on test (and held-out clients);
@@ -151,7 +151,7 @@ uv run python -m hinglish_asr.benchmark --run runs/calls-v1 --push-winner \
     --client-test /data-g/uday/calls/client_test_manifest.jsonl     # if test_clients is set
 ```
 
-**Data** (`bolai.py`, `plan.py`, `convert.py`, `configs/data-g/uday/calls_deepgram.yaml`).
+**Data** (`bolai.py`, `plan.py`, `convert.py`, `configs/data/calls_deepgram.yaml`).
 At the pinned revision, 2,170 files hold 2,958 Deepgram hours; each file is
 ~25% Deepgram, so taking all of it downloads 529 GB. About a fifth of the
 Deepgram rows are empty "unintelligible" chunks and are dropped, leaving
@@ -241,7 +241,11 @@ Each arm's LR schedule spans the full run's `max_steps` (from
 first 4,000 steps of the schedule it would have in the full run, instead of
 annealing to `min_lr` within the sweep. Child runs log to
 `runs/logs/<name>.log`. Rerunning the same `--name` resumes from its last
-checkpoint.
+checkpoint (saved every 1,000 steps). After running out of GPU memory, or
+being killed by the host's OOM killer, each sweep arm (and `run --retries N`)
+does that by itself, up to 2 times by default. It stops when an attempt dies
+at the same checkpoint as the one before. Failed attempts' logs are kept as
+`runs/logs/<name>.oom<n>.log`.
 
 **Checkpoints on the Hub** (`checkpoint_hub_repo` in `configs/train.yaml`,
 set to `kapturecx/nemotron-3.5-fine-tune`; `null` keeps everything local).

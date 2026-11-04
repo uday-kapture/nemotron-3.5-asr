@@ -11,6 +11,8 @@ import pytest
 from hinglish_asr import train
 from hinglish_asr.train import (
     _child,
+    _child_resuming,
+    last_step,
     big_tmpdir,
     last_error,
     apply_overrides,
@@ -210,3 +212,53 @@ def test_temp_files_go_next_to_the_runs_unless_tmpdir_is_set(tmp_path, monkeypat
     assert tempfile.gettempdir() == str((tmp_path / "runs" / "tmp").resolve())
     monkeypatch.setenv("TMPDIR", str(tmp_path / "big"))  # set but missing: created, not ignored
     assert big_tmpdir(tmp_path / "runs") == (tmp_path / "big").resolve() and (tmp_path / "big").is_dir()
+
+
+def _attempts(tmp_path, monkeypatch, outcomes):
+    """_child_resuming over fake attempts: each outcome is (status, returncode, -last step it leaves)."""
+    cfg = tmp_path / "train.yaml"
+    cfg.write_text(f"run_root: {tmp_path / 'runs'}\narms: {{noam: {{}}}}\n")
+    ckpts = tmp_path / "runs" / "sweep-noam" / "checkpoints"
+    ckpts.mkdir(parents=True)
+    log = tmp_path / "runs" / "logs" / "sweep-noam.log"
+    log.parent.mkdir(parents=True)
+    calls = []
+
+    def child(args, name, stage, arm, sets, parent):
+        status, rc, step = outcomes[len(calls)]
+        calls.append(name)
+        for p in ckpts.glob("*-last.ckpt"):
+            p.unlink()
+        if step is not None:
+            (ckpts / f"step={step}-val_wer=0.2000-last.ckpt").touch()
+        log.write_text("attempt\n")
+        return {"status": status, "returncode": rc, "error": "x", "log": str(log)}
+
+    monkeypatch.setattr(train, "_child", child)
+    monkeypatch.setattr(train.time, "sleep", lambda s: None)
+    r = _child_resuming(argparse.Namespace(config=str(cfg)), "sweep-noam", "sweep", "noam", [], None, retries=3)
+    return r, len(calls), sorted(p.name for p in log.parent.iterdir())
+
+
+def test_out_of_memory_is_resumed_while_each_attempt_gets_further(tmp_path, monkeypatch):
+    r, n, logs = _attempts(tmp_path, monkeypatch, [("oom", 1, 1000), ("failed", -9, 2000), ("ok", 0, 4000)])
+    assert r["status"] == "ok" and n == 3
+    assert logs == ["sweep-noam.log", "sweep-noam.oom1.log", "sweep-noam.oom2.log"]
+
+
+def test_out_of_memory_at_the_same_checkpoint_twice_is_not_retried_again(tmp_path, monkeypatch):
+    r, n, _ = _attempts(tmp_path, monkeypatch, [("oom", 1, 1000), ("oom", 1, 1000), ("ok", 0, 4000)])
+    assert r["status"] == "oom" and n == 2
+
+
+def test_other_failures_are_not_retried(tmp_path, monkeypatch):
+    r, n, _ = _attempts(tmp_path, monkeypatch, [("failed", 1, 1000), ("ok", 0, 4000)])
+    assert r["status"] == "failed" and n == 1
+
+
+def test_last_step_reads_the_resume_checkpoint(tmp_path):
+    assert last_step(tmp_path) is None
+    (tmp_path / "checkpoints").mkdir()
+    (tmp_path / "checkpoints" / "step=3000-val_wer=0.1800-last.ckpt").touch()
+    (tmp_path / "checkpoints" / "step=1000-val_wer=0.2000.ckpt").touch()
+    assert last_step(tmp_path) == 3000
