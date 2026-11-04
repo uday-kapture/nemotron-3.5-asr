@@ -7,7 +7,7 @@
 base_model: models/base/nemotron-3.5-asr-streaming-0.6b.nemo
 run_root: runs
 mlflow:
-  experiment: hinglish-asr-calls
+  experiment: Nemotron-fine-tune
 
 data:
   input_cfg: configs/input_cfg.yaml                   # hinglish_asr.input_cfg --entry /data-g/uday/calls/train:1.0:langID
