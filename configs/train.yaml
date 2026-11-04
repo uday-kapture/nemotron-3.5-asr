@@ -10,9 +10,9 @@ mlflow:
   experiment: hinglish-asr-calls
 
 data:
-  input_cfg: configs/input_cfg.yaml                   # hinglish_asr.input_cfg --entry /data/calls/train:1.0:langID
-  val_manifest: /data/calls/val_small_manifest.jsonl  # 3 h, customer-disjoint from train
-  report: /data/calls/report.json                     # convert's report; `pilot` reads train hours from it
+  input_cfg: configs/input_cfg.yaml                   # hinglish_asr.input_cfg --entry /data-g/uday/calls/train:1.0:langID
+  val_manifest: /data-g/uday/calls/val_small_manifest.jsonl  # 3 h, customer-disjoint from train
+  report: /data-g/uday/calls/report.json                     # convert's report; `pilot` reads train hours from it
 
 model:
   att_context_size: [56, 0]      # deployment lookahead (80 ms): validation and checkpoint choice

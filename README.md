@@ -127,16 +127,16 @@ uv run hf auth login                         # unless HF_TOKEN is in .env: read 
 scripts/fetch_inputs.sh                      # checks dataset read, checkpoint repo write, MLflow; fetches models/base/*.nemo
 
 # 1. plan: which files hold Deepgram rows, from the dataset's stats only
-uv run python -m hinglish_asr.plan --config configs/data/calls_deepgram.yaml --out /data/calls/plan.json
+uv run python -m hinglish_asr.plan --config configs/data-g/uday/calls_deepgram.yaml --out /data-g/uday/calls/plan.json
 
 # 2. convert: download each file whole, keep Deepgram rows, write tar shards + held-out manifests
 uv run python -m hinglish_asr.convert \
-    --plan /data/calls/plan.json --out /data/calls --limit-files 3      # look at report.json first
-uv run python -m hinglish_asr.convert --plan /data/calls/plan.json --out /data/calls   # HF_XET_HIGH_PERFORMANCE from .env
+    --plan /data-g/uday/calls/plan.json --out /data-g/uday/calls --limit-files 3      # look at report.json first
+uv run python -m hinglish_asr.convert --plan /data-g/uday/calls/plan.json --out /data-g/uday/calls   # HF_XET_HIGH_PERFORMANCE from .env
 #   short on disk: add --upload-to kapturecx/<private-shard-repo> to stream the training tars instead
 
 # 3. blend
-uv run python -m hinglish_asr.input_cfg --entry /data/calls/train:1.0:langID --out configs/input_cfg.yaml
+uv run python -m hinglish_asr.input_cfg --entry /data-g/uday/calls/train:1.0:langID --out configs/input_cfg.yaml
 
 # 4. pilot: batch size, speed, max_steps   5. LR sweep   6. full run
 uv run python -m hinglish_asr.train pilot --arm cosine --batch-durations 300 400 500 600 --passes 3
@@ -147,11 +147,11 @@ uv run python -m hinglish_asr.train run --arm cosine --name calls-v1 \
 # 7. benchmark the checkpoints: choose on val, report on test (and held-out clients);
 #    --push-winner puts winner.nemo and the report in runs/calls-v1/ of the checkpoint repo
 uv run python -m hinglish_asr.benchmark --run runs/calls-v1 --push-winner \
-    --val /data/calls/val_manifest.jsonl --test /data/calls/test_manifest.jsonl \
-    --client-test /data/calls/client_test_manifest.jsonl     # if test_clients is set
+    --val /data-g/uday/calls/val_manifest.jsonl --test /data-g/uday/calls/test_manifest.jsonl \
+    --client-test /data-g/uday/calls/client_test_manifest.jsonl     # if test_clients is set
 ```
 
-**Data** (`bolai.py`, `plan.py`, `convert.py`, `configs/data/calls_deepgram.yaml`).
+**Data** (`bolai.py`, `plan.py`, `convert.py`, `configs/data-g/uday/calls_deepgram.yaml`).
 At the pinned revision, 2,170 files hold 2,958 Deepgram hours; each file is
 ~25% Deepgram, so taking all of it downloads 529 GB. About a fifth of the
 Deepgram rows are empty "unintelligible" chunks and are dropped, leaving
