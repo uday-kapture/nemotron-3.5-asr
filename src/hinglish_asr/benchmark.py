@@ -407,10 +407,10 @@ def main(argv: list[str] | None = None) -> dict:
     (out_dir / "cross_script_pairs.json").write_text(json.dumps(pairs, ensure_ascii=False, indent=1) + "\n")
     print((out_dir / "benchmark.md").read_text(), file=sys.stderr)
 
+    if push_to:  # first: the weights matter more than the MLflow copy of the report
+        push_results(push_to, out_dir, winner)
     if not args.no_mlflow:
         _log_mlflow(run_dir, run_cfg, result, out_dir, args.log_model and winner != "base")
-    if push_to:
-        push_results(push_to, out_dir, winner)
     return result
 
 
@@ -471,10 +471,16 @@ def _log_mlflow(run_dir: Path, run_cfg: dict, result: dict, out_dir: Path, log_m
                 if split in winner:
                     tracking.log_metrics(_flat_metrics(winner[split]), prefix=f"benchmark/{split}/")
             # benchmark.* only: predictions and cross-script pairs hold transcripts.
-            mlflow.log_artifact(str(out_dir / "benchmark.md"), "benchmark")
-            mlflow.log_artifact(str(out_dir / "benchmark.json"), "benchmark")
-            if log_model:
-                mlflow.log_artifact(str(out_dir / "winner.nemo"), "model")
+            # Uploading files needs the server's artifact store, which metrics never touch:
+            # if it fails, the report is still on disk (and on the Hub with --push-winner).
+            try:
+                mlflow.log_artifact(str(out_dir / "benchmark.md"), "benchmark")
+                mlflow.log_artifact(str(out_dir / "benchmark.json"), "benchmark")
+                if log_model:
+                    mlflow.log_artifact(str(out_dir / "winner.nemo"), "model")
+            except mlflow.exceptions.MlflowException as exc:
+                print(f"MLflow artifact upload failed, metrics are logged; files stay in {out_dir}: {exc}",
+                      file=sys.stderr)
 
 
 if __name__ == "__main__":
