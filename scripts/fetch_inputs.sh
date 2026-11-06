@@ -29,7 +29,7 @@ MODEL = "nvidia/nemotron-3.5-asr-streaming-0.6b"
 MODEL_REVISION = "ea30d66debe3740a08b573244286791d423d6b3e"
 NEMO = "nemotron-3.5-asr-streaming-0.6b.nemo"
 
-cfg = yaml.safe_load(Path("configs/data/calls_deepgram.yaml").read_text())
+cfg = yaml.safe_load(Path("configs/data/calls_mix.yaml").read_text())
 train_cfg = yaml.safe_load(Path("configs/train.yaml").read_text())
 api = HfApi()
 try:

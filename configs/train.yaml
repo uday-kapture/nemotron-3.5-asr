@@ -41,7 +41,7 @@ model:
     min_duration: 0.1
     num_workers: 8
     pin_memory: true
-    default_prompt_mode: langID  # the row's lang (hi-IN): the deployment prompt; input_cfg tags langID too
+    default_prompt_mode: langID  # the row's lang (hi-IN or en-US): both deployment prompts; input_cfg tags langID too
   validation_ds:
     use_lhotse: true
     batch_size: 32

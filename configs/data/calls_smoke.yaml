@@ -1,23 +1,31 @@
-# Smoke run: the first ~8 Deepgram hours of the real plan (same seed, so the
-# same leading files), about 6 files and 1.5 GB to download. Bigger held-out
-# fractions than calls_deepgram.yaml so val and test are not near-empty.
+# Smoke run: the first ~40 planned hours of the smoke shares (same seed),
+# about 10 files: calls plus one public file. Bigger
+# held-out fractions than calls_mix.yaml so val and test are not near-empty.
 # Everything else matches the real run.
 
 dataset: kapturecx/bolAIndia
 revision: 3e812ecb20f11e074f5d7116a44e752b373cde5e
 
-subsets: [combined, inhouse-asr-2]
-vendor: deepgram_nova-3
-max_vendor_hours: 8
-plan_seed: calls-v1
+subsets:
+  combined: 0.66
+  inhouse-asr-1: 0.02
+  inhouse-asr-2: 0.01
+  indicvoices: 0.08
+  spring-inx: 0.05
+  vaani: 0.05
+  shrutilipi: 0.05
+  pretraining-v1-kathbath: 0.03
+  nptel: 0.05
+heldout_subsets: [combined, inhouse-asr-1, inhouse-asr-2]
+max_hours: 40
+plan_seed: mix-v1
 
-provider: deepgram
-languages: [hi]
+providers: null
+languages: [hi, en]
 min_duration: 0.1
 max_duration: 20.0
 min_confidence: 0.0
 channels: null
-numbers_to_digits: true
 
 val_frac: 0.05
 test_frac: 0.05

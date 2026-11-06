@@ -4,6 +4,7 @@ import pytest
 
 from hinglish_asr.benchmark import (
     breakdown, choose, duration_bucket, evaluate, find_checkpoints, hub_target, push_results, render_markdown,
+    transcribe_by_prompt,
 )
 
 
@@ -95,3 +96,16 @@ def test_push_results_uploads_the_winner_and_report_but_not_a_base_winner(tmp_pa
     assert "runs/calls-v1/winner.nemo" in api.files
     assert push_results(("org/ft", "calls-v2"), tmp_path, "base", api=api) == [
         "benchmark/benchmark.json", "benchmark/benchmark.md"]
+
+
+def test_each_row_is_decoded_with_its_own_language_prompt():
+    calls = []
+
+    def fake_transcribe(model, paths, prompt, context, batch_size):
+        calls.append((prompt, paths))
+        return [f"{prompt}:{p}" for p in paths]
+
+    rows = [{"audio_filepath": "a", "target_lang": "hi-IN"}, {"audio_filepath": "b", "target_lang": "en-US"},
+            {"audio_filepath": "c"}]
+    assert transcribe_by_prompt(fake_transcribe, None, rows, 8) == ["hi-IN:a", "en-US:b", "hi-IN:c"]
+    assert calls == [("en-US", ["b"]), ("hi-IN", ["a", "c"])]

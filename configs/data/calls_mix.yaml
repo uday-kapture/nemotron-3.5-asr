@@ -1,0 +1,60 @@
+# Training data: Kapture production calls from kapturecx/bolAIndia, every
+# vendor, plus human-labelled public hi/en speech for acoustic and label
+# diversity, so no single vendor's mistakes dominate. Read by
+# `hinglish_asr.plan`, which copies it into plan.json; `hinglish_asr.convert`
+# reads it from there.
+#
+# Label styles differ by source: Deepgram writes English words in Latin
+# (`mobile`), AssemblyAI and Gnani in Devanagari (`मोबाइल`), and the public
+# sets mostly in Devanagari. Numbers stay as each source wrote them.
+
+dataset: kapturecx/bolAIndia
+# The dataset grows; file lists and stats are only meaningful at a fixed commit.
+revision: 3e812ecb20f11e074f5d7116a44e752b373cde5e
+
+# Subset -> share of the planned hours. Available hi+en hours outside test
+# splits at this revision, from the stats: combined 19,811 (AssemblyAI 85%,
+# Deepgram 15%, Gnani 1%), inhouse-asr-1 417, inhouse-asr-2 10, indicvoices 791,
+# vaani 755, shrutilipi 1,363, spring-inx 187, pretraining-v1-kathbath 140,
+# nptel 4,066 (en). A subset that runs out stops; the rest fill the cap.
+# Left out: mucs-hinglish (all test: an eval set), worldspeech (CC-BY-NC),
+# yodas3 / seamlessalign-indic / podcast-captions (machine-aligned web audio),
+# *-untranscribed.
+subsets:
+  combined: 0.66                 # Kapture calls, all vendors
+  inhouse-asr-1: 0.02            # Kapture calls, AssemblyAI
+  inhouse-asr-2: 0.01            # Kapture calls, Deepgram
+  indicvoices: 0.08              # AI4Bharat, spontaneous and read, many districts
+  spring-inx: 0.05               # IIT Madras, two-party conversations
+  vaani: 0.05                    # IISc/ARTPARK, spontaneous image descriptions
+  shrutilipi: 0.05               # AI4Bharat, All India Radio news
+  pretraining-v1-kathbath: 0.03  # AI4Bharat, read sentences
+  nptel: 0.05                    # Indian-English lectures (en)
+# Only these give val/test rows; the public subsets are training data only.
+heldout_subsets: [combined, inhouse-asr-1, inhouse-asr-2]
+# Cap on planned hours, estimated from the stats (null = everything). 1000 = 205
+# files, ~21 GB to download; a quarter of call rows are empty and dropped. To
+# grow: raise the cap, rerun plan, rerun convert on the same --out (the cap is
+# not in config_sha and only appends files). Changing shares needs a new --out.
+max_hours: 1000
+plan_seed: mix-v1                # per-subset file order
+
+# Rows
+providers: null                  # `provider` column values to keep; null = every vendor and `human`
+# Both prompt modes: each row trains with its own language prompt (hi-IN / en-US).
+languages: [hi, en]
+min_duration: 0.1
+max_duration: 20.0               # the base model was pre-trained on <= 20 s
+min_confidence: 0.0              # human rows have no confidence; raise only with `providers` set to vendors
+channels: null                   # e.g. [right]; null = both sides of the call
+
+# Splits (call subsets only): hashed by customer (phone hash), so a customer
+# never straddles splits.
+val_frac: 0.01
+test_frac: 0.01
+split_seed: calls-v1
+val_small_hours: 3.0             # validation subset used during training
+# Whole clients held out of every other split (client_test_manifest.jsonl):
+# val/test share agents and clients with train, this does not. Choose from
+# report.json's splits.train.top_clients after a trial run; [] = none.
+test_clients: []

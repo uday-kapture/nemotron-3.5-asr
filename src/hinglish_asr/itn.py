@@ -1,8 +1,10 @@
 """Number words -> digits in training targets (inverse text normalization).
 
+Not used by the pipeline at the moment: `convert` keeps numbers as each
+source wrote them. Kept for when digit targets come back.
+
 Deepgram writes most numbers as Hindi words, and the base model's hi-IN mode
-does too. With `numbers_to_digits: true` in the data config, `convert`
-rewrites them before training, for train and held-out references alike:
+does too. This rewrites them:
 
     दो सौ पचास रुपये             -> 250 रुपये
     नौ आठ सात छह पांच चार        -> 987654       (digit by digit: joined)
@@ -13,7 +15,9 @@ Left as words, because the digit form would be wrong or is unsure:
 
 - a lone number below 10: एक बार, दो दिन, कर दो (दो is also "give", एक "a");
 - two or three numbers in a row read as a range: एक दो दिन, दस बारह, दो तीन सौ.
-  A digit-by-digit number needs at least 4 numbers;
+  A digit-by-digit number needs at least 4 numbers, or 3 read in pairs;
+- numbers in a row that are each whole: दो हज़ार तीन हज़ार, चार सौ बीस पांच सौ
+  (2000, 3000 / 420, 500): place values only fall within one number;
 - fractions: डेढ़, साढ़े तीन (बजे): the tokenizer has no ":" for 3:30;
 - दो after a multiplier at the end of a sentence (पांच सौ दो = "give 500",
   not 502): Hindi puts the verb last.
@@ -31,6 +35,7 @@ from .semantic import _number_token, dev_fold, form_switch, run_pieces
 
 _DO = dev_fold("दो")
 MIN_DIGIT_RUN = 4  # numbers read digit by digit (phone, OTP, PIN); fewer is a range like "एक दो"
+MIN_PAIR_RUN = 3  # two-digit numbers read in pairs (पचासी तैंतालीस सत्ताईस = 854327); two is a range like "दस बारह"
 
 
 def _is_punct(ch: str) -> bool:
@@ -55,7 +60,10 @@ def _digits(nums: list[tuple[str, float, str | None]]) -> str | None:
     pieces = run_pieces(nums)
     if any("." in p for p in pieces):
         return None
-    if len(pieces) > 1 and (len(pieces) < MIN_DIGIT_RUN or any(len(p) > 2 for p in pieces)):
+    if len(pieces) > 1 and any(len(p) > 2 for p in pieces):
+        return None
+    pairs = len(pieces) >= MIN_PAIR_RUN and all(len(p) == 2 for p in pieces)
+    if 1 < len(pieces) < MIN_DIGIT_RUN and not pairs:
         return None
     return "".join(pieces)
 

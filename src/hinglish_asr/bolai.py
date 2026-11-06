@@ -85,7 +85,7 @@ def customer_key(row: dict) -> str:
 
 @dataclass(frozen=True)
 class RowFilter:
-    provider: str = "deepgram"
+    providers: tuple[str, ...] | None = None  # `provider` column values; None = every vendor and human labels
     languages: tuple[str, ...] = ("hi", "en")
     min_duration: float = 0.1
     max_duration: float = 20.0
@@ -94,9 +94,9 @@ class RowFilter:
 
     @classmethod
     def from_config(cls, cfg: dict) -> RowFilter:
-        channels = cfg.get("channels")
+        channels, providers = cfg.get("channels"), cfg.get("providers")
         return cls(
-            provider=cfg["provider"],
+            providers=tuple(providers) if providers else None,
             languages=tuple(cfg["languages"]),
             min_duration=cfg["min_duration"],
             max_duration=cfg["max_duration"],
@@ -110,7 +110,7 @@ class RowFilter:
         In bolAIndia an empty transcript, is_unintelligible and confidence 0
         come together (a quarter of Deepgram rows in the sampled file).
         """
-        if row.get("provider") != self.provider:
+        if self.providers and row.get("provider") not in self.providers:
             return "other_vendor"
         if row.get("is_unintelligible") or not (row.get("text") or "").strip():
             return "unintelligible"

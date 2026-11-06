@@ -9,7 +9,8 @@ average of the top-k weights. Top-k checkpoints come from <run>/checkpoints/,
 or, if the run wrote checkpoint_hub.json, from its private HF model repo: each
 is downloaded once, loaded, and deleted (the average is accumulated as they
 load). Each is decoded on the full val split at 80 ms
-with the `hi-IN` prompt (offline decoding at that lookahead equals cache-aware
+with each row's own language prompt, hi-IN or en-US from its target_lang
+(offline decoding at that lookahead equals cache-aware
 streaming; the winner is re-checked with the streaming loop on a sample). The
 winner has the lowest val WER. Test is decoded once, for the winner and the
 base model only, so it is never used to choose, and the gain over the base
@@ -51,7 +52,20 @@ from .scoring import error_rate, paired_bootstrap, score_corpus, utterance_error
 from .semantic import lenient_scores, semdist_summary
 
 DEPLOY_CONTEXT = [56, 0]
-DEPLOY_PROMPT = "hi-IN"
+DEFAULT_PROMPT = "hi-IN"  # for rows without target_lang
+
+
+def transcribe_by_prompt(transcribe, model, rows: list[dict], batch_size: int) -> list[str]:
+    """Decode each row with its own language prompt (its target_lang), in row order."""
+    by_prompt: dict[str, list[int]] = defaultdict(list)
+    for i, r in enumerate(rows):
+        by_prompt[r.get("target_lang") or DEFAULT_PROMPT].append(i)
+    hyps = [""] * len(rows)
+    for prompt, idx in sorted(by_prompt.items()):
+        out = transcribe(model, [rows[i]["audio_filepath"] for i in idx], prompt, DEPLOY_CONTEXT, batch_size)
+        for i, h in zip(idx, out):
+            hyps[i] = h
+    return hyps
 
 
 # ---------- candidates ----------
@@ -316,7 +330,7 @@ def main(argv: list[str] | None = None) -> dict:
     def decode(name: str, split: str) -> list[str]:
         rows = splits[split]
         t0 = time.perf_counter()
-        hyps = transcribe_offline(model, [r["audio_filepath"] for r in rows], DEPLOY_PROMPT, DEPLOY_CONTEXT, args.batch_size)
+        hyps = transcribe_by_prompt(transcribe_offline, model, rows, args.batch_size)
         wall = time.perf_counter() - t0
         with (out_dir / "predictions" / f"{name}_{split}.jsonl").open("w", encoding="utf-8") as fh:
             for r, h in zip(rows, hyps):
@@ -364,9 +378,9 @@ def main(argv: list[str] | None = None) -> dict:
 
     # The winner's weights are loaded now (test decoded last): streaming check, then save.
     sample = random.Random(0).sample(splits["val"], min(args.streaming_sample, len(splits["val"])))
-    paths, refs = [r["audio_filepath"] for r in sample], [r["text"] for r in sample]
-    offline = score_corpus(refs, transcribe_offline(model, paths, DEPLOY_PROMPT, DEPLOY_CONTEXT, args.batch_size), equivalents)["wer"]
-    streaming = score_corpus(refs, transcribe_streaming(model, paths, DEPLOY_PROMPT, DEPLOY_CONTEXT, args.batch_size), equivalents)["wer"]
+    refs = [r["text"] for r in sample]
+    offline = score_corpus(refs, transcribe_by_prompt(transcribe_offline, model, sample, args.batch_size), equivalents)["wer"]
+    streaming = score_corpus(refs, transcribe_by_prompt(transcribe_streaming, model, sample, args.batch_size), equivalents)["wer"]
     if winner != "base":
         model.save_to(str(out_dir / "winner.nemo"))
 
@@ -392,7 +406,7 @@ def main(argv: list[str] | None = None) -> dict:
         "base": base,
         "att_context": DEPLOY_CONTEXT,
         "latency_ms": latency_ms(DEPLOY_CONTEXT),
-        "prompt": DEPLOY_PROMPT,
+        "prompt": "each row's target_lang (hi-IN, en-US)",
         "val": args.val,
         "test": args.test,
         "client_test": args.client_test,

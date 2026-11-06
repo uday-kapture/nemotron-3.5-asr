@@ -24,7 +24,6 @@ def _row(**kw):
     "change,reason",
     [
         ({}, None),
-        ({"provider": "assemblyai"}, "other_vendor"),
         ({"is_unintelligible": True, "text": ""}, "unintelligible"),
         ({"text": "  "}, "unintelligible"),
         ({"source_collection": "Test"}, "test_collection"),
@@ -36,6 +35,14 @@ def _row(**kw):
 )
 def test_row_filter_reasons(change, reason):
     assert RowFilter().reason(_row(**change)) == reason
+
+
+def test_row_filter_providers_are_opt_in():
+    assert RowFilter().reason(_row(provider="human")) is None
+    assert RowFilter(providers=("deepgram",)).reason(_row(provider="assemblyai")) == "other_vendor"
+    assert RowFilter.from_config({
+        "providers": ["deepgram"], "languages": ["hi"], "min_duration": 0.1, "max_duration": 20.0, "min_confidence": 0.0,
+    }).providers == ("deepgram",)
 
 
 def test_row_filter_confidence_and_channel_are_opt_in():

@@ -23,6 +23,11 @@ from hinglish_asr.itn import numbers_to_digits
         ("पांच सौ दो रुपये", "502 रुपये"),
         ("(दो सौ)", "(200)"),
         ("हाँ जी, दो सौ, पचास", "हाँ जी, 200, 50"),
+        ("pin number है पचासी तैंतालीस सत्ताईस", "pin number है 854327"),  # spoken in pairs
+        ("एक सौ हज़ार", "100000"),
+        ("twenty five thousand", "25000"),
+        ("one hundred twenty", "120"),
+        ("नौ आठ जीरो सात", "9807"),
     ],
 )
 def test_number_words_become_digits(text, expected):
@@ -36,6 +41,8 @@ def test_number_words_become_digits(text, expected):
         "एक दो दिन", "दस बारह दिन", "दो तीन सौ रुपये", "शून्य नौ आठ",  # ranges, too short for digit by digit
         "डेढ़ घंटा", "साढ़े तीन बजे", "पौने",  # fractions and bare modifiers
         "1 2 3 4", "500 दो", "₹1,000 दो",  # already digits
+        # several whole numbers: place values only fall within one number
+        "दो हज़ार तीन हज़ार नहीं", "चार सौ बीस पांच सौ", "सौ सौ रुपये", "बीस पांच",
     ],
 )
 def test_unsure_numbers_stay_as_written(text):

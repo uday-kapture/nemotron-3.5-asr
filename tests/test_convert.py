@@ -15,7 +15,7 @@ from hinglish_asr.input_cfg import build_entry
 CFG = {
     "dataset": "org/ds",
     "revision": "a" * 40,
-    "provider": "deepgram",
+    "providers": ["deepgram"],
     "languages": ["hi", "en"],
     "min_duration": 0.1,
     "max_duration": 20.0,
@@ -249,8 +249,30 @@ def test_rerun_refuses_files_converted_with_another_config(tmp_path, repo):
     out = tmp_path / "out"
     convert(plan, out, workers=1, local_root=str(root), limit_files=1)
     changed = {**plan, "config": {**CFG, "min_confidence": 0.6}, "config_sha": "def"}
-    with pytest.raises(ValueError, match=r"files \[0\].*different config"):
+    with pytest.raises(ValueError, match=r"files \[0\].*different file or config"):
         convert(changed, out, workers=1, local_root=str(root))
+
+
+def test_rerun_refuses_a_plan_that_put_another_file_at_an_index(tmp_path, repo):
+    root, plan = repo
+    out = tmp_path / "out"
+    convert(plan, out, workers=1, local_root=str(root), limit_files=1)
+    moved = {**plan, "files": [{"index": 0, "path": "data/combined/f1.parquet"}]}
+    with pytest.raises(ValueError, match=r"files \[0\].*different file"):
+        convert(moved, out, workers=1, local_root=str(root))
+
+
+def test_public_subsets_go_to_training_whole_and_every_vendor_is_kept(tmp_path, repo):
+    root, plan = repo
+    _parquet(root / "data/spring-inx/s0.parquet", [_row(300 + i, f"cust{i}", provider="human") for i in range(20)])
+    plan["config"] = {**CFG, "providers": None, "heldout_subsets": ["combined"]}
+    plan["files"].append({"index": 2, "path": "data/spring-inx/s0.parquet"})
+    out = tmp_path / "out"
+    report = convert(plan, out, workers=1, local_root=str(root))
+    assert len(_jsonl(out / "train/sharded_manifests/manifest_2.json")) == 20
+    held = _jsonl(out / "val_manifest.jsonl") + _jsonl(out / "test_manifest.jsonl")
+    assert held and not {r["id"] for r in held} & {f"chunk_{300 + i:04d}" for i in range(20)}
+    assert not report["dropped"].get("other_vendor")  # the assemblyai row is kept
 
 
 class FlakyHub(FakeHub):
@@ -309,17 +331,15 @@ def test_heldout_ids_repeated_across_files_are_dropped(tmp_path):
     assert report["heldout_id_clashes_dropped"] == 2
 
 
-def test_numbers_to_digits_rewrites_every_split_and_is_reported(tmp_path):
+def test_numbers_stay_as_the_source_wrote_them(tmp_path):
     root = tmp_path / "repo"
     rows = [_row(i, f"cust{i % 12}", text="दो सौ पचास रुपये कर दो") for i in range(24)]
     _parquet(root / "data/combined/f0.parquet", rows)
-    cfg = {**CFG, "numbers_to_digits": True}
-    plan = {"config": cfg, "config_sha": "n", "files": [{"index": 0, "path": "data/combined/f0.parquet"}]}
+    plan = {"config": CFG, "config_sha": "n", "files": [{"index": 0, "path": "data/combined/f0.parquet"}]}
     out = tmp_path / "out"
     report = convert(plan, out, workers=1, local_root=str(root))
 
     texts = {r["text"] for r in _jsonl(out / "train/sharded_manifests/manifest_0.json")}
     texts |= {r["text"] for split in ("val", "test") for r in _jsonl(out / f"{split}_manifest.jsonl")}
-    assert texts == {"250 रुपये कर दो"}
-    assert report["numbers_to_digits"]["rows"] == 24
-    assert report["numbers_to_digits"]["examples"][0] == ["दो सौ पचास रुपये कर दो", "250 रुपये कर दो"]
+    assert texts == {"दो सौ पचास रुपये कर दो"}
+    assert "numbers_to_digits" not in report

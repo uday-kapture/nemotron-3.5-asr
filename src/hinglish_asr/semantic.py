@@ -139,7 +139,7 @@ def same_word_across_scripts(a: str, b: str) -> bool:
 # ---------- numbers ----------
 
 _HI_NUMBERS = (
-    "शून्य 0|एक 1|दो 2|तीन 3|चार 4|पांच 5|पाँच 5|छह 6|छः 6|छे 6|सात 7|आठ 8|नौ 9|दस 10|"
+    "शून्य 0|जीरो 0|एक 1|दो 2|तीन 3|चार 4|पांच 5|पाँच 5|छह 6|छः 6|छे 6|सात 7|आठ 8|नौ 9|दस 10|"
     "ग्यारह 11|बारह 12|तेरह 13|चौदह 14|पंद्रह 15|पन्द्रह 15|सोलह 16|सत्रह 17|अठारह 18|उन्नीस 19|बीस 20|"
     "इक्कीस 21|बाईस 22|तेईस 23|चौबीस 24|पच्चीस 25|छब्बीस 26|सत्ताईस 27|अट्ठाईस 28|उनतीस 29|तीस 30|"
     "इकतीस 31|बत्तीस 32|तैंतीस 33|चौंतीस 34|पैंतीस 35|छत्तीस 36|सैंतीस 37|अड़तीस 38|उनतालीस 39|चालीस 40|"
@@ -156,9 +156,10 @@ _HI_NUMBERS = (
 )
 _EN_NUMBERS = (
     "zero 0|one 1|two 2|three 3|four 4|five 5|six 6|seven 7|eight 8|nine 9|ten 10|eleven 11|twelve 12|"
-    "thirteen 13|fourteen 14|fifteen 15|sixteen 16|seventeen 17|eighteen 18|nineteen 19|twenty 20|"
-    "thirty 30|forty 40|fifty 50|sixty 60|seventy 70|eighty 80|ninety 90"
+    "thirteen 13|fourteen 14|fifteen 15|sixteen 16|seventeen 17|eighteen 18|nineteen 19"
 )
+# Their own kind: only an English ten takes a following unit (twenty five = 25).
+_EN_TENS = "twenty 20|thirty 30|forty 40|fifty 50|sixty 60|seventy 70|eighty 80|ninety 90"
 _MULTIPLIERS = {
     "सौ": 100, "हज़ार": 1000, "हजार": 1000, "लाख": 100_000, "करोड़": 10_000_000, "करोड": 10_000_000,
     "hundred": 100, "thousand": 1000, "lakh": 100_000, "lakhs": 100_000, "crore": 10_000_000,
@@ -173,6 +174,7 @@ def _table(spec: str) -> dict[str, float]:
 
 
 _NUM_KEY = {dev_fold(k): v for k, v in _table(_HI_NUMBERS).items()} | _table(_EN_NUMBERS)
+_TENS_KEY = _table(_EN_TENS)
 _MULT_KEY = {dev_fold(k): v for k, v in _MULTIPLIERS.items()}
 _MOD_KEY = {dev_fold(k): v for k, v in _MODIFIERS.items()}
 
@@ -184,6 +186,8 @@ def _number_token(tok: str) -> tuple[str, float, str | None] | None:
     key = dev_fold(tok)
     if key in _NUM_KEY:
         return ("num", _NUM_KEY[key], None)
+    if key in _TENS_KEY:
+        return ("tens", _TENS_KEY[key], None)
     if key in _MULT_KEY:
         return ("mult", float(_MULT_KEY[key]), None)
     if key in _MOD_KEY:
@@ -209,32 +213,48 @@ def _run_value(run: list[tuple[str, float, str | None]]) -> str:
 def run_pieces(run: list[tuple[str, float, str | None]]) -> list[str]:
     """The numbers a run is read as, in order; `_run_value` joins them."""
     pieces: list[str] = []
-    total, cur, text, mod = 0.0, None, None, 0.0
+    total, cur, text, mod, tens = 0.0, None, None, 0.0, False
+    # Place values fall within one number, as in the Indian system: what follows
+    # `total` must be below its last multiplier. दो हज़ार तीन हज़ार is 2000 and
+    # 3000, not 5000; सौ सौ is 100 and 100.
+    place = float("inf")
 
     def piece() -> str:
         return text if text is not None and not total else _fmt(total + (cur or 0.0))
 
+    def end_total():
+        nonlocal total, place
+        pieces.append(_fmt(total))
+        total, place = 0.0, float("inf")
+
     for kind, val, digits in run:
         if kind == "mod":
             mod = val
-        elif kind == "num":
+        elif kind in ("num", "tens"):
             if digits is not None and text is not None and not total:
                 text += digits
                 cur = float(text)
                 continue
             if mod:
                 val, digits, mod = val + mod, None, 0.0
+            if cur is None and total and val >= place:
+                end_total()
             if cur is None:
                 cur, text = val, digits
-            elif digits is None and text is None and 20 <= cur < 100 and cur % 10 == 0 and val < 10:
-                cur += val
+            elif tens and kind == "num" and digits is None and val < 10:
+                cur += val  # twenty five; Hindi has a word for each of 21-99, so बीस पांच is two numbers
             else:
                 pieces.append(piece())
-                total, cur, text = 0.0, val, digits
+                total, cur, text, place = 0.0, val, digits, float("inf")
+            tens = kind == "tens"
         else:  # multiplier
-            base = cur if cur is not None else 1.0 + mod
-            mod = 0.0
-            total += base * val
+            if cur is None and total and val > place:
+                total *= val  # एक सौ हज़ार = 100 हज़ार
+            else:
+                if total and val >= place:
+                    end_total()
+                total += (cur if cur is not None else 1.0 + mod) * val
+            place, mod, tens = val, 0.0, False
             cur, text = None, None
     if cur is not None or total:
         pieces.append(piece())
@@ -274,7 +294,7 @@ def canonical_tokens(tokens: list[str]) -> list[tuple[str, str]]:
 
 def form_switch(prev: tuple[str, float, str | None], num: tuple[str, float, str | None]) -> bool:
     """`num` follows number `prev` in the other form (digits vs words), so it starts a new number."""
-    return prev[0] == num[0] == "num" and (prev[2] is None) != (num[2] is None)
+    return prev[0] in ("num", "tens") and num[0] in ("num", "tens") and (prev[2] is None) != (num[2] is None)
 
 
 # ---------- alignment ----------

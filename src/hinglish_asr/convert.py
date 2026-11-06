@@ -24,6 +24,10 @@ then merges them into val_manifest.jsonl, test_manifest.jsonl,
 val_small_manifest.jsonl (customer-disjoint subset of val used during
 training), client_test_manifest.jsonl and report.json.
 
+Only files of the config's `heldout_subsets` (the calls) give val and test
+rows; the public subsets mixed in for diversity go to training whole, so
+evaluation stays on calls.
+
 val and test hold out customers, but not the agents who talk to them: an
 agent works many calls and is in train too. `test_clients` holds out whole
 clients (businesses), and with them their agents and their vocabulary; pick
@@ -62,16 +66,16 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import soundfile as sf
 from huggingface_hub import CommitOperationAdd
 
-from .bolai import COLUMNS, TARGET_LANG, RowFilter, customer_key
+from .bolai import COLUMNS, TARGET_LANG, RowFilter, customer_key, subset_of
 from .hub import ensure_private_repo
 from .scoring import script_of
 from .split import assign_split
-from .itn import numbers_to_digits
 from .textnorm import normalize_target
 
 SAMPLE_RATE = 16000
@@ -109,25 +113,24 @@ def convert_file(job: _Job) -> dict:
     test_clients = {str(c) for c in cfg.get("test_clients") or ()}
     dropped, kept, seconds = Counter(), Counter(), Counter()
     train, held, ids = [], [], set()
-    rows = text_changed = numbers_changed = 0
-    number_examples: list[tuple[str, str]] = []
-    digits = bool(cfg.get("numbers_to_digits"))
+    rows = text_changed = 0
+    # Only these subsets (the calls) give val/test rows; the rest is training data only.
+    heldout_subsets = cfg.get("heldout_subsets")
+    holds_out = heldout_subsets is None or subset_of(job.path) in heldout_subsets
     try:
         pf = pq.ParquetFile(src)
         names = [c for c in COLUMNS if c in pf.schema_arrow.names]
         for batch in pf.iter_batches(batch_size=2048, columns=names):
             rows += batch.num_rows
-            # Most rows are other vendors; skip them before building Python objects.
-            mine = batch.filter(pc.equal(batch.column("provider"), flt.provider))
+            # Skip other vendors' rows before building Python objects.
+            mine = batch.filter(pc.is_in(batch.column("provider"), pa.array(flt.providers))) if flt.providers else batch
             dropped["other_vendor"] += batch.num_rows - mine.num_rows
             for row in mine.to_pylist():
                 reason = flt.reason(row)
                 if reason:
                     dropped[reason] += 1
                     continue
-                text = written = normalize_target(row["text"])
-                if digits:
-                    text = numbers_to_digits(written)
+                text = normalize_target(row["text"])
                 if not text:
                     dropped["empty_text"] += 1
                     continue
@@ -158,7 +161,9 @@ def convert_file(job: _Job) -> dict:
                     continue
                 ids.add(rid)
                 group = customer_key(row)
-                if str(row.get("client_id")) in test_clients:
+                if not holds_out:
+                    split = "train"
+                elif str(row.get("client_id")) in test_clients:
                     split = "client_test"
                 else:
                     split = assign_split(group, cfg["val_frac"], cfg["test_frac"], cfg["split_seed"])
@@ -177,10 +182,6 @@ def convert_file(job: _Job) -> dict:
                     "confidence": None if conf is None else round(conf, 4),
                 }
                 text_changed += text != row["text"]
-                if text != written:
-                    numbers_changed += 1
-                    if len(number_examples) < 20:
-                        number_examples.append((written, text))
                 kept[split] += 1
                 seconds[split] += info.duration
                 if split == "train":
@@ -222,8 +223,6 @@ def convert_file(job: _Job) -> dict:
         "hours": {s: v / 3600 for s, v in seconds.items()},
         "dropped": dict(dropped),
         "text_changed_by_normalization": text_changed,
-        "numbers_to_digits": numbers_changed,
-        "number_examples": number_examples,
         "bytes": size,
         "elapsed_s": round(time.perf_counter() - t0, 1),
     }
@@ -430,10 +429,6 @@ def finalize(out: str | Path, plan: dict, files: list[dict]) -> dict:
         "heldout_hours_by_language": {k: round(v / 3600, 3) for k, v in by_language.items()},
         "heldout_hours_by_channel": {str(k): round(v / 3600, 3) for k, v in by_channel.items()},
         "text_changed_by_normalization": sum(d["text_changed_by_normalization"] for d in done.values()),
-        "numbers_to_digits": {
-            "rows": sum(d.get("numbers_to_digits", 0) for d in done.values()),
-            "examples": [e for d in done.values() for e in d.get("number_examples", [])][:100],
-        },
         "downloaded_gb": round(sum(d["bytes"] for d in done.values()) / 1e9, 2),
     }
     (out / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -461,11 +456,11 @@ def convert(
     stale = [
         f["index"] for f in files
         if (marker := out / "done" / f"{f['index']}.json").exists()
-        and json.loads(marker.read_text()).get("config_sha", sha) != sha
+        and ((d := json.loads(marker.read_text())).get("config_sha", sha) != sha or d.get("path", f["path"]) != f["path"])
     ]
     if stale:
         raise ValueError(
-            f"files {stale[:10]} in {out} were converted with a different config than this plan "
+            f"files {stale[:10]} in {out} were converted from a different file or config than this plan "
             f"(config_sha {sha}); use a new --out, or delete their done/<k>.json to convert them again"
         )
     jobs = [

@@ -114,10 +114,12 @@ one entry per source with its weight and `prompt_mode` tag.
 ## Calls pipeline: bolAIndia → fine-tune → benchmark
 
 Everything below runs on the GPU box. Training text is Kapture call chunks
-from the gated `kapturecx/bolAIndia` whose transcript came from Deepgram
-nova-3, the only vendor that writes English words in Latin script. The model
-is trained and judged at the deployment setting: 80 ms lookahead
-(`att_context_size [56,0]`) and the `hi-IN` prompt.
+from the gated `kapturecx/bolAIndia`, from every transcription vendor, mixed
+with human-labelled public hi/en speech from the same dataset, so that no
+single vendor's mistakes dominate the labels. Rows labelled `hi` and `en` both
+train, each with its own language prompt (`hi-IN`, `en-US`). The model is
+trained and judged at the deployment lookahead: 80 ms
+(`att_context_size [56,0]`).
 
 ```bash
 uv sync --extra nemo --extra mlflow --extra semantic
@@ -126,10 +128,10 @@ source .env                                  # in every new shell / tmux window
 uv run hf auth login                         # unless HF_TOKEN is in .env: read kapturecx/bolAIndia, write the checkpoint repo
 scripts/fetch_inputs.sh                      # checks dataset read, checkpoint repo write, MLflow; fetches models/base/*.nemo
 
-# 1. plan: which files hold Deepgram rows, from the dataset's stats only
-uv run python -m hinglish_asr.plan --config configs/data/calls_deepgram.yaml --out /data-g/uday/calls/plan.json
+# 1. plan: which files, mixed by subset share, from the dataset's stats only
+uv run python -m hinglish_asr.plan --config configs/data/calls_mix.yaml --out /data-g/uday/calls/plan.json
 
-# 2. convert: download each file whole, keep Deepgram rows, write tar shards + held-out manifests
+# 2. convert: download each file whole, keep hi/en rows, write tar shards + held-out manifests
 uv run python -m hinglish_asr.convert \
     --plan /data-g/uday/calls/plan.json --out /data-g/uday/calls --limit-files 3      # look at report.json first
 uv run python -m hinglish_asr.convert --plan /data-g/uday/calls/plan.json --out /data-g/uday/calls   # HF_XET_HIGH_PERFORMANCE from .env
@@ -151,26 +153,27 @@ uv run python -m hinglish_asr.benchmark --run runs/calls-v1 --push-winner \
     --client-test /data-g/uday/calls/client_test_manifest.jsonl     # if test_clients is set
 ```
 
-**Data** (`bolai.py`, `plan.py`, `convert.py`, `configs/data/calls_deepgram.yaml`).
-At the pinned revision, 2,170 files hold 2,958 Deepgram hours; each file is
-~25% Deepgram, so taking all of it downloads 529 GB. About a fifth of the
-Deepgram rows are empty "unintelligible" chunks and are dropped, leaving
-~2,300 h; keeping only the rows Deepgram labelled `hi` (`languages: [hi]`:
-the model is tuned for the hi-IN prompt, and Deepgram's English model on Hindi
-speech writes romanized Hindi) leaves an estimated ~1,900 h. The stats count
-language per file, not per vendor, so that is an estimate; the plan's vendor
-hours include the `en` rows, and `report.json` has the hours actually kept.
-The config starts smaller: `max_vendor_hours: 800` takes the first 577
-planned files (~140 GB to download) for ~500 h kept.
-`numbers_to_digits: true` rewrites number words as digits in every split
-(`दो सौ पचास रुपये` → `250 रुपये`, `नौ आठ सात छह` → `9876`). A lone number
-below 10 (`दो दिन`, `कर दो`), a short range (`एक दो दिन`), a fraction
-(`साढ़े तीन बजे`) and a sentence-final `दो` after `सौ`/`हज़ार` (`पांच सौ दो`,
-"give 500") stay as words; see `itn.py`. `report.json`'s `numbers_to_digits`
-counts the rows changed and lists examples to check.
+**Data** (`bolai.py`, `plan.py`, `convert.py`, `configs/data/calls_mix.yaml`).
+`subsets` maps each subset to its share of the planned hours. The calls
+(`combined`, `inhouse-asr-1`, `inhouse-asr-2`) take 69%: at the pinned
+revision they hold ~20,200 h of hi+en, transcribed by AssemblyAI (85%),
+Deepgram (15%) and Gnani (1%). Human-labelled public sets take the rest:
+indicvoices, spring-inx, vaani, shrutilipi, kathbath (hi) and nptel
+(Indian English). `plan` estimates each file's usable hours from the stats
+(hours in `languages`, scaled by the share outside test splits), shuffles
+each subset's files with a seed, and keeps taking the next file from whichever
+subset would be furthest below its share with that file in. `max_hours: 1000`
+plans 208 files, ~21 GB to download; about a quarter of call rows are empty
+"unintelligible" chunks and are dropped. `report.json` has the hours
+actually kept.
+Label styles differ by source: Deepgram writes English words in Latin
+(`mobile`), AssemblyAI and Gnani in Devanagari (`मोबाइल`); numbers stay as
+each source wrote them (`itn.py`, number words → digits, is not used for now).
+Only `heldout_subsets` (the calls) give val and test rows; the public subsets
+are training data only.
 The audio is already 16 kHz mono FLAC chunks, so the converter
-copies the bytes into `train/audio_<k>.tar` (about 105 GB in total) without
-resampling. Rows are split by customer: the phone hash of the called party
+copies the bytes into `train/audio_<k>.tar` without
+resampling. Call rows are split by customer: the phone hash of the called party
 on outbound calls, the caller on inbound ones. 1% of customers each go to
 val and test, and `val_small_manifest.jsonl` (3 h) is the validation set used
 during training. That keeps customers apart, not agents: an agent works many
@@ -179,23 +182,22 @@ calls, so the agent side of val and test is speech the model trained on.
 (`client_test_manifest.jsonl`), and with them their agents; pick them from
 `report.json`'s `splits.train.top_clients` after the trial run.
 
-To grow the data, raise `max_vendor_hours` (or set it to null), rerun `plan`,
+To grow the data, raise `max_hours` (or set it to null), rerun `plan`,
 and rerun `convert` on the same `--out`: a bigger plan starts with the same
 files, and the cap is left out of the config hash, so only the new files are
-converted. Then rerun `input_cfg`. val and test grow too, so compare an older
+converted. Changing the shares reorders the plan: use a new `--out`. Then rerun `input_cfg`. val and test grow too, so compare an older
 model with a newer one by benchmarking both on the new test split.
 
 Reruns skip finished files (`done/<k>.json`). A done file records the
-config's hash, so after changing the config (and rerunning `plan`) convert
-refuses an `--out` that holds files made with the old one; use a new `--out`
+config's hash and the file's path, so after changing the config (and rerunning
+`plan`) convert refuses an `--out` that holds files made with the old one; use a new `--out`
 or delete those `done/<k>.json`. Rows whose `chunk_id` repeats within a file,
 or is unusable as a file name, are dropped (`duplicate_id`, `bad_id`): NeMo
 pairs tar members with manifest rows by name. A held-out id found in two files
 is dropped from both (`heldout_id_clashes_dropped`), as they share one audio
 file. Duration limits apply to the audio's own length, not `duration_s`. `report.json` gives hours per
-split, drops by reason, the Latin-word share (~23% for Deepgram), hours by
-client, and Deepgram confidence quantiles. Use the quantiles to set
-`min_confidence` before the full conversion.
+split, drops by reason, the Latin-word share, hours by client, and
+confidence quantiles (vendor rows only; human rows have none).
 
 **Streaming the training shards** (`convert --upload-to REPO`).
 - **During conversion:** each finished tar and its manifest go to a private
@@ -208,7 +210,7 @@ client, and Deepgram confidence quantiles. Use the quantiles to set
 - **During training:** `input_cfg` sees `train/remote.json` and writes the tar
   paths as `pipe:curl … https://huggingface.co/datasets/REPO/resolve/<commit>/…`,
   pinned to the commit `convert` recorded. NeMo reads each shard as a stream.
-  Training needs about 13 MB/s at 1,000× realtime, or about 105 GB per pass.
+  Training needs about 13 MB/s at 1,000× realtime, or about 47 GB per pass over 1,000 h.
 - **Auth:** curl reads the token from a header file (mode 600, written from
   your HF login), so the token is never in the YAML or the process list. Use a
   token with write access to the shard repo for convert, and read access for
@@ -220,7 +222,7 @@ client, and Deepgram confidence quantiles. Use the quantiles to set
 
 **Training** (`train.py`, `configs/train.yaml`) follows NeMo's
 `speech_to_text_finetune.py`. It adds:
-- validation at 80 ms with the hi-IN prompt; `val_wer` scores the
+- validation at 80 ms with each row's language prompt; `val_wer` scores the
   benchmark's normalization (tags, case, punctuation), so the top-k it keeps
   are the ones the benchmark would rank best;
 - lookahead sampling weighted to 80 ms (`att_context_probs`; NeMo's default
@@ -267,7 +269,7 @@ those names carry no `val_wer`, so the top-k trimming never touches them.
 **Benchmark** (`benchmark.py`, `semantic.py`).
 - **Candidates:** the base model, the top-k checkpoints, the last checkpoint,
   and the average of the top-k weights. Each is decoded on the full val split
-  at 80 ms with `hi-IN`.
+  at 80 ms, each row with its own prompt (`hi-IN` or `en-US`).
 - **Choosing:** lowest val WER wins. Test (and `--client-test`) is decoded only
   for the winner and the base model.
 - **Metrics:**
@@ -290,8 +292,10 @@ those names carry no `val_wer`, so the top-k trimming never touches them.
   Predictions and `cross_script_pairs.json` (the cross-script matches to
   audit) hold transcripts and stay on the box.
 
-All eval splits are scored against Deepgram's transcripts, so every call WER
-here measures agreement with Deepgram, not accuracy.
+All eval splits are scored against the vendors' transcripts, so every call WER
+here measures agreement with them, not accuracy. Vendors write English words in
+different scripts, so plain WER counts `mobile`/`मोबाइल` as an error; lenient
+WER does not.
 
 **MLflow** (`tracking.py`). Every stage refuses to run without
 `MLFLOW_TRACKING_URI`, because the fallback would be a local store nobody
