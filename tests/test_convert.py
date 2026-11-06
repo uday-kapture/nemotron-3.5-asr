@@ -223,11 +223,16 @@ def test_upload_refuses_public_repos_and_the_source_dataset(tmp_path, repo):
 def test_repeated_or_unusable_ids_are_dropped(tmp_path):
     root = tmp_path / "repo"
     rows = [_row(i, f"cust{i}") for i in range(6)]
-    rows += [_row(0, "cust9"), _row(7, "cust7", chunk_id="a/b"), _row(8, "cust8", chunk_id=None)]
+    rows += [_row(0, "cust9"), _row(7, "cust7", chunk_id=".hidden"), _row(8, "cust8", chunk_id=None)]
+    rows += [_row(9, "cust10", chunk_id="shrutilipi/rec_chunk_9")]  # public subsets' ids are paths
     _parquet(root / "data/combined/f0.parquet", rows)
     plan = {"config": CFG, "config_sha": "abc", "files": [{"index": 0, "path": "data/combined/f0.parquet"}]}
-    report = convert(plan, tmp_path / "out", workers=1, local_root=str(root))
+    out = tmp_path / "out"
+    report = convert(plan, out, workers=1, local_root=str(root))
     assert {k: v for k, v in report["dropped"].items() if v} == {"duplicate_id": 1, "bad_id": 2}
+    kept = _jsonl(out / "train/sharded_manifests/manifest_0.json") + _jsonl(out / "val_manifest.jsonl")
+    kept += _jsonl(out / "test_manifest.jsonl")
+    assert "shrutilipi__rec_chunk_9" in {r["id"] for r in kept}
 
 
 def test_test_clients_are_held_out_of_every_other_split(tmp_path, repo):

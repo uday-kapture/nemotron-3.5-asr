@@ -124,7 +124,8 @@ def convert_file(job: _Job) -> dict:
             rows += batch.num_rows
             # Skip other vendors' rows before building Python objects.
             mine = batch.filter(pc.is_in(batch.column("provider"), pa.array(flt.providers))) if flt.providers else batch
-            dropped["other_vendor"] += batch.num_rows - mine.num_rows
+            if flt.providers:
+                dropped["other_vendor"] += batch.num_rows - mine.num_rows
             for row in mine.to_pylist():
                 reason = flt.reason(row)
                 if reason:
@@ -152,8 +153,9 @@ def convert_file(job: _Job) -> dict:
                     continue
                 # The id names the tar member and the held-out file: NeMo pairs tar
                 # members with manifest rows by name, so a repeat would mix up audio and text.
-                rid = str(row.get("chunk_id") or "")
-                if not rid or "/" in rid or rid.startswith("."):
+                # Public subsets' ids are paths (shrutilipi/<recording>_chunk_9): flatten them.
+                rid = str(row.get("chunk_id") or "").replace("/", "__")
+                if not rid or rid.startswith("."):
                     dropped["bad_id"] += 1
                     continue
                 if rid in ids:
