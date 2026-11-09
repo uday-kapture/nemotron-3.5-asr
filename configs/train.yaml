@@ -42,6 +42,9 @@ model:
     num_workers: 8
     pin_memory: true
     default_prompt_mode: langID  # the row's lang (hi-IN or en-US): both deployment prompts; input_cfg tags langID too
+    # Tar shards are read as an iterable dataset anyway; this lets a plain JSONL
+    # entry (verify_empty's train_empty_manifest.jsonl) join them in input_cfg.
+    force_iterable_dataset: true
   validation_ds:
     use_lhotse: true
     batch_size: 32
