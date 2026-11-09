@@ -182,6 +182,31 @@ calls, so the agent side of val and test is speech the model trained on.
 (`client_test_manifest.jsonl`), and with them their agents; pick them from
 `report.json`'s `splits.train.top_clients` after the trial run.
 
+**Spoken-style variant** (`configs/data/calls_spoken.yaml`): the same files,
+prepared the way `kapturecx/hinden-ASR-1_7B-vaani` prepared its data:
+- `min_confidence` per provider: AssemblyAI 0.65 and Deepgram 0.60. Below
+  about 0.6, AssemblyAI often writes another language on Hindi audio. Rows
+  without a confidence (human labels, Gnani) are not gated.
+- `target_style: spoken`: lowercase, no punctuation (apostrophes inside words
+  stay), and numbers as words in the row's language (`verbalize.py`):
+  `₹2,000` → `दो हज़ार रुपये`, `4:30` → `साढ़े चार`, `9876543210` digit by digit.
+  `report.json`'s `digits_left` lists rows that still hold a digit.
+- `empty_targets`: clips the vendor left empty are set aside as candidates
+  (`empty_candidates.jsonl`, `empty/audio/`). VAD can't vouch for them, since
+  every chunk is VAD-cut. `verify_empty` decodes them with the base model and
+  keeps those it also leaves empty.
+
+```bash
+uv run python -m hinglish_asr.plan --config configs/data/calls_spoken.yaml --out /data-g/uday/calls-spoken/plan.json
+uv run python -m hinglish_asr.convert --plan /data-g/uday/calls-spoken/plan.json --out /data-g/uday/calls-spoken
+uv run --extra nemo python -m hinglish_asr.verify_empty --data /data-g/uday/calls-spoken
+uv run python -m hinglish_asr.input_cfg --out configs/input_cfg.yaml \
+    --entry /data-g/uday/calls-spoken/train:0.97:langID \
+    --entry /data-g/uday/calls-spoken/train_empty_manifest.jsonl:0.03:langID
+# benchmark: --val val_manifest.jsonl val_empty_manifest.jsonl (same for --test);
+# it reports the hallucination rate on the empty clips, which WER skips
+```
+
 To grow the data, raise `max_hours` (or set it to null), rerun `plan`,
 and rerun `convert` on the same `--out`: a bigger plan starts with the same
 files, and the cap is left out of the config hash, so only the new files are
@@ -251,17 +276,22 @@ at the same checkpoint as the one before. Failed attempts' logs are kept as
 
 **Checkpoints on the Hub** (`checkpoint_hub_repo` in `configs/train.yaml`,
 set to `kapturecx/nemotron-3.5-fine-tune`; `null` keeps everything local).
-With a private HF model repo there, the top-k checkpoints are never
-written locally. Each goes straight to `runs/<name>/` in the repo as weights
+With a private HF model repo there, the top-k checkpoints are kept on local
+disk only until they are uploaded. Each goes to `runs/<name>/` in the repo as weights
 only, about 2.4 GB instead of 8 GB with optimizer state, and the same commit
 deletes whatever falls out of the top 5. Only the `-last` checkpoint (about
 8 GB, with optimizer state) stays on disk, for resuming. NeMo's end-of-run
 `.nemo` is switched off, because it reloads the best checkpoint from disk;
 the benchmark writes `winner.nemo`. The benchmark reads `checkpoint_hub.json`
 in the run directory. It downloads each candidate once, loads it, deletes it,
-and builds the top-k average while they load. An upload happens at each
-validation (every 1,000 steps) and blocks training for as long as 2.4 GB
-takes to upload. The pilot uploads nothing; each sweep arm uploads its own
+and builds the top-k average while they load. An upload can happen at each
+validation (every 1,000 steps). Uploads run on a background thread, one at a
+time and in order, while training goes on: at 3 MB/s one takes about 14
+minutes, longer than an epoch, so a few copies of 2.4 GB can queue in
+`<run>/upload-tmp/`. A queued checkpoint that has fallen out of the top 5 by
+its turn is skipped. The run waits for the queue before it finishes, and a
+failed upload fails the run. A process killed while uploads are queued loses
+those checkpoints. The pilot uploads nothing; each sweep arm uploads its own
 `runs/<sweep>-<arm>/`. `benchmark --push-winner` adds `runs/<name>/winner.nemo`
 (unless the base model won) and `runs/<name>/benchmark/benchmark.{md,json}`;
 those names carry no `val_wer`, so the top-k trimming never touches them.

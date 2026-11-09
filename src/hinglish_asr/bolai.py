@@ -89,8 +89,13 @@ class RowFilter:
     languages: tuple[str, ...] = ("hi", "en")
     min_duration: float = 0.1
     max_duration: float = 20.0
-    min_confidence: float = 0.0
+    # One threshold for every vendor, or {provider: threshold}: vendors' confidences
+    # are not on one scale. Rows without a confidence (human labels) are not gated.
+    min_confidence: float | dict[str, float] = 0.0
     channels: tuple[str, ...] | None = None
+    # Empty clips (no transcript, or is_unintelligible) become empty-target
+    # candidates for `verify_empty` instead of being dropped.
+    empty_targets: bool = False
 
     @classmethod
     def from_config(cls, cfg: dict) -> RowFilter:
@@ -102,7 +107,40 @@ class RowFilter:
             max_duration=cfg["max_duration"],
             min_confidence=cfg["min_confidence"],
             channels=tuple(channels) if channels else None,
+            empty_targets=bool(cfg.get("empty_targets")),
         )
+
+    def confidence_floor(self, provider: str | None) -> float:
+        if isinstance(self.min_confidence, dict):
+            return self.min_confidence.get(provider, 0.0)
+        return self.min_confidence
+
+    def _common(self, row: dict) -> str | None:
+        if (row.get("source_collection") or "").lower() in TEST_LIKE_COLLECTIONS:
+            return "test_collection"
+        if self.channels and row.get("channel") not in self.channels:
+            return "channel"
+        duration = row.get("duration_s") or 0.0
+        if duration < self.min_duration:
+            return "too_short"
+        if duration > self.max_duration:
+            return "too_long"
+        return None
+
+    def empty_target(self, row: dict) -> bool:
+        """A clip the vendor heard nothing in: a candidate empty target.
+
+        Not proof of silence: every chunk is VAD-cut, so VAD speech ratios of empty
+        and transcribed clips overlap. `verify_empty` keeps only clips a second
+        model also leaves empty. Language is not checked: such rows often have none.
+        """
+        if not self.empty_targets:
+            return False
+        if self.providers and row.get("provider") not in self.providers:
+            return False
+        if not (row.get("is_unintelligible") or not (row.get("text") or "").strip()):
+            return False
+        return self._common(row) is None
 
     def reason(self, row: dict) -> str | None:
         """Why `row` is not used, or None to keep it.
@@ -118,13 +156,9 @@ class RowFilter:
             return "test_collection"
         if row.get("language_code") not in self.languages:
             return "language"
-        if self.channels and row.get("channel") not in self.channels:
-            return "channel"
-        duration = row.get("duration_s") or 0.0
-        if duration < self.min_duration:
-            return "too_short"
-        if duration > self.max_duration:
-            return "too_long"
-        if (row.get("confidence") or 0.0) < self.min_confidence:
+        if reason := self._common(row):
+            return reason
+        conf = row.get("confidence")
+        if conf is not None and conf < self.confidence_floor(row.get("provider")):
             return "low_confidence"
         return None

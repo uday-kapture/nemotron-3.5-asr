@@ -72,3 +72,22 @@ def test_load_stats_applies_aliases_and_merges_hosts(tmp_path):
 def test_subset_of():
     assert subset_of("data/combined/combined-1.parquet") == "combined"
     assert subset_of("stats/x.json") == ""
+
+
+def test_confidence_floor_can_differ_by_provider_and_skips_human_rows():
+    f = RowFilter(min_confidence={"deepgram": 0.7, "assemblyai": 0.5})
+    assert f.reason(_row(confidence=0.6)) == "low_confidence"
+    assert f.reason(_row(provider="assemblyai", confidence=0.6)) is None
+    assert f.reason(_row(provider="gnani", confidence=0.1)) is None  # no floor set
+    assert RowFilter(min_confidence=0.9).reason(_row(provider="human", confidence=None)) is None
+
+
+def test_empty_target_candidates_are_clips_the_vendor_left_empty():
+    f = RowFilter(empty_targets=True)
+    silent = _row(text="", is_unintelligible=True, confidence=0.0, language_code=None)
+    assert f.reason(silent) == "unintelligible" and f.empty_target(silent)
+    assert f.empty_target(_row(text="  "))
+    assert not f.empty_target(_row())  # has a transcript
+    assert not f.empty_target({**silent, "duration_s": 30.0})
+    assert not f.empty_target({**silent, "source_collection": "test"})
+    assert not RowFilter().empty_target(silent)  # off unless configured

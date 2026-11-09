@@ -1,6 +1,7 @@
 import io
 import json
 import tarfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -348,3 +349,26 @@ def test_numbers_stay_as_the_source_wrote_them(tmp_path):
     texts |= {r["text"] for split in ("val", "test") for r in _jsonl(out / f"{split}_manifest.jsonl")}
     assert texts == {"दो सौ पचास रुपये कर दो"}
     assert "numbers_to_digits" not in report
+
+
+def test_spoken_style_and_empty_targets(tmp_path):
+    root = tmp_path / "repo"
+    rows = [_row(i, f"cust{i % 12}", text="Order ₹500, cancel कर दो।", speech_ratio=0.8) for i in range(24)]
+    rows += [_row(100 + i, f"cust{i % 12}", text="", is_unintelligible=True, confidence=0.0, language_code=None,
+                  speech_ratio=0.7) for i in range(24)]
+    _parquet(root / "data/combined/f0.parquet", rows)
+    cfg = {**CFG, "target_style": "spoken", "empty_targets": {"keep": 0.5}}
+    plan = {"config": cfg, "config_sha": "s", "files": [{"index": 0, "path": "data/combined/f0.parquet"}]}
+    out = tmp_path / "out"
+    report = convert(plan, out, workers=1, local_root=str(root))
+    rows_out = _jsonl(out / "train/sharded_manifests/manifest_0.json")
+    rows_out += _jsonl(out / "val_manifest.jsonl") + _jsonl(out / "test_manifest.jsonl")
+    assert {r["text"] for r in rows_out} == {"order पांच सौ रुपये cancel कर दो"}  # candidates stay out
+    empty = _jsonl(out / "empty_candidates.jsonl")
+    assert 4 <= len(empty) <= 20  # about half of the 24 empty clips
+    assert all(r["text"] == "" and r["target_lang"] == "hi-IN" and r["language"] == "hi" for r in empty)
+    assert all(Path(r["audio_filepath"]).exists() and r["for_split"] in ("train", "val", "test") for r in empty)
+    assert report["dropped"]["unintelligible"] == 24 - len(empty)
+    assert sum(v["clips"] for v in report["empty_candidates"].values()) == len(empty)
+    assert report["digits_left"]["rows"] == 0
+    assert set(report["train_confidence_quantiles"]) == {"deepgram"}

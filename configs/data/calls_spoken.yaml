@@ -1,0 +1,53 @@
+# calls_mix.yaml's data (same subsets, shares and plan seed: the same files),
+# prepared with hinden-ASR-1_7B-vaani's recipe:
+#   - per-provider confidence gates;
+#   - targets in the plain spoken style: lowercase, no punctuation, numbers as
+#     words in the row's language (textnorm.spoken_target);
+#   - empty targets for clips with no speech, verified by a second model
+#     (verify_empty) before they train.
+# The targets differ from calls_mix's, so this needs its own --out.
+
+dataset: kapturecx/bolAIndia
+revision: 3e812ecb20f11e074f5d7116a44e752b373cde5e
+
+subsets:
+  combined: 0.66
+  inhouse-asr-1: 0.02
+  inhouse-asr-2: 0.01
+  indicvoices: 0.08
+  spring-inx: 0.05
+  vaani: 0.05
+  shrutilipi: 0.05
+  pretraining-v1-kathbath: 0.03
+  nptel: 0.05
+heldout_subsets: [combined, inhouse-asr-1, inhouse-asr-2]
+max_hours: 1000
+plan_seed: mix-v1
+
+# Rows
+providers: null
+languages: [hi, en]
+min_duration: 0.1
+max_duration: 20.0
+# Per provider; rows without a confidence (human labels, Gnani) are not gated.
+# From two call files (5,189 AssemblyAI / 1,278 Deepgram hi+en rows): below
+# ~0.6, AssemblyAI often writes another language on Hindi audio ("Ah, bonjour",
+# "Vayan y háganlo"); from 0.65 transcripts are mostly plausible. These drop
+# ~10% of AssemblyAI and ~7% of Deepgram rows (p10 0.643 / 0.653).
+min_confidence:
+  assemblyai: 0.65
+  deepgram: 0.60
+channels: null
+target_style: spoken             # as_written (default) keeps vendors' case, punctuation and digits
+# Clips the vendor left empty (~8% of call rows) become candidates; verify_empty
+# keeps those the base model also leaves empty. keep = share of candidates set aside.
+empty_targets:
+  keep: 1.0
+
+# Splits (call subsets only): hashed by customer (phone hash), so a customer
+# never straddles splits.
+val_frac: 0.01
+test_frac: 0.01
+split_seed: calls-v1
+val_small_hours: 3.0
+test_clients: []

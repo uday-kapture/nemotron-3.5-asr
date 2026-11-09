@@ -109,3 +109,11 @@ def test_each_row_is_decoded_with_its_own_language_prompt():
             {"audio_filepath": "c"}]
     assert transcribe_by_prompt(fake_transcribe, None, rows, 8) == ["hi-IN:a", "en-US:b", "hi-IN:c"]
     assert calls == [("en-US", ["b"]), ("hi-IN", ["a", "c"])]
+
+
+def test_hallucination_counts_words_on_empty_reference_clips():
+    from hinglish_asr.benchmark import hallucination
+
+    out = hallucination(["", "", "हाँ जी", ""], ["", "हाँ", "हाँ जी", " . "])
+    assert out == {"empty_ref_clips": 3, "hallucination_rate": 1 / 3}
+    assert hallucination(["a"], ["b"])["hallucination_rate"] is None

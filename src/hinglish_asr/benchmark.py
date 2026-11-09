@@ -48,7 +48,7 @@ from pathlib import Path
 import yaml
 
 from .hub import rank_checkpoints
-from .scoring import error_rate, paired_bootstrap, score_corpus, utterance_errors
+from .scoring import error_rate, normalize_for_scoring, paired_bootstrap, score_corpus, utterance_errors
 from .semantic import lenient_scores, semdist_summary
 
 DEPLOY_CONTEXT = [56, 0]
@@ -134,6 +134,7 @@ def evaluate(rows: list[dict], hyps: list[str], equivalents=None, semdist=None) 
     out = score_corpus(refs, hyps, equivalents)
     out["lenient_wer"] = lenient["lenient_wer"]
     out["lenient_matches"] = lenient["matches_by_rule"]
+    out.update(hallucination(refs, hyps))
     if semdist is not None:
         out.update(semdist_summary(semdist.score(refs, hyps, equivalents)))
     out["by"] = {
@@ -144,6 +145,16 @@ def evaluate(rows: list[dict], hyps: list[str], equivalents=None, semdist=None) 
     }
     out["_cross_script_pairs"] = lenient["cross_script_pairs"]
     return out, per
+
+
+def hallucination(refs: list[str], hyps: list[str]) -> dict:
+    """On clips whose reference is empty (silence, noise): the share where the model wrote something.
+
+    WER skips these clips, so this is the only score of what the model says when nobody speaks.
+    """
+    empty = [h for r, h in zip(refs, hyps) if not normalize_for_scoring(r)]
+    said = sum(1 for h in empty if normalize_for_scoring(h))
+    return {"empty_ref_clips": len(empty), "hallucination_rate": said / len(empty) if empty else None}
 
 
 def choose(candidates: dict[str, dict], metric: str = "wer") -> str:
@@ -184,8 +195,8 @@ def render_markdown(result: dict) -> str:
         "",
         "## Val (chooses the winner)",
         "",
-        "| candidate | WER | Δ vs base | CER | WER Devanagari | WER Latin | lenient WER | semdist |",
-        "|---|---|---|---|---|---|---|---|",
+        "| candidate | WER | Δ vs base | CER | WER Devanagari | WER Latin | lenient WER | semdist | hallucination |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for name, c in cands.items():
         v = c["val"]
@@ -193,12 +204,13 @@ def render_markdown(result: dict) -> str:
         sd = "–" if v.get("semdist_mean") is None else f"{v['semdist_mean']:.4f}"
         lines.append(
             f"| {name}{mark} | {_pct(v['wer'])} | {_delta(c.get('val_vs_base'))} | {_pct(v['cer'])} "
-            f"| {_pct(v.get('wer_devanagari'))} | {_pct(v.get('wer_latin'))} | {_pct(v['lenient_wer'])} | {sd} |"
+            f"| {_pct(v.get('wer_devanagari'))} | {_pct(v.get('wer_latin'))} | {_pct(v['lenient_wer'])} | {sd} "
+            f"| {_pct(v.get('hallucination_rate'))} |"
         )
     for split in reported:
         lines += ["", f"## {REPORTED[split]}", "",
-                  "| model | WER | Δ vs base | CER | WER Devanagari | WER Latin | lenient WER | semdist |",
-                  "|---|---|---|---|---|---|---|---|"]
+                  "| model | WER | Δ vs base | CER | WER Devanagari | WER Latin | lenient WER | semdist | hallucination |",
+                  "|---|---|---|---|---|---|---|---|---|"]
         for name, c in cands.items():
             if split not in c:
                 continue
@@ -206,7 +218,8 @@ def render_markdown(result: dict) -> str:
             sd = "–" if t.get("semdist_mean") is None else f"{t['semdist_mean']:.4f}"
             lines.append(
                 f"| {name} | {_pct(t['wer'])} | {_delta(c.get(f'{split}_vs_base'))} | {_pct(t['cer'])} "
-                f"| {_pct(t.get('wer_devanagari'))} | {_pct(t.get('wer_latin'))} | {_pct(t['lenient_wer'])} | {sd} |"
+                f"| {_pct(t.get('wer_devanagari'))} | {_pct(t.get('wer_latin'))} | {_pct(t['lenient_wer'])} | {sd} "
+                f"| {_pct(t.get('hallucination_rate'))} |"
             )
     lines += ["", "## Checks", ""]
     for name, check in result["checks"].items():
@@ -225,9 +238,12 @@ def render_markdown(result: dict) -> str:
 # ---------- main ----------
 
 
-def _read_jsonl(path: str) -> list[dict]:
-    with open(path, encoding="utf-8") as fh:
-        return [json.loads(line) for line in fh if line.strip()]
+def _read_jsonl(*paths: str) -> list[dict]:
+    rows = []
+    for path in paths:
+        with open(path, encoding="utf-8") as fh:
+            rows += [json.loads(line) for line in fh if line.strip()]
+    return rows
 
 
 def _strip_private(d: dict) -> dict:
@@ -237,9 +253,10 @@ def _strip_private(d: dict) -> dict:
 def main(argv: list[str] | None = None) -> dict:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run", required=True, help="training run directory (config.yaml, checkpoints/)")
-    p.add_argument("--val", required=True, help="full val manifest from convert")
-    p.add_argument("--test", required=True)
-    p.add_argument("--client-test", help="convert's client_test_manifest.jsonl (whole clients held out)")
+    p.add_argument("--val", required=True, nargs="+",
+                   help="full val manifest from convert, plus verify_empty's val_empty_manifest.jsonl if made")
+    p.add_argument("--test", required=True, nargs="+")
+    p.add_argument("--client-test", nargs="+", help="convert's client_test_manifest.jsonl (whole clients held out)")
     p.add_argument("--base", help="base .nemo (default: base_model in the run's config.yaml)")
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--device", default="cuda")
@@ -272,9 +289,9 @@ def main(argv: list[str] | None = None) -> dict:
     base = args.base or run_cfg["base_model"]
     out_dir = run_dir / "benchmark"
     (out_dir / "predictions").mkdir(parents=True, exist_ok=True)
-    splits = {"val": _read_jsonl(args.val), "test": _read_jsonl(args.test)}
+    splits = {"val": _read_jsonl(*args.val), "test": _read_jsonl(*args.test)}
     if args.client_test:
-        splits["client_test"] = _read_jsonl(args.client_test)
+        splits["client_test"] = _read_jsonl(*args.client_test)
     reported = [s for s in REPORTED if s in splits]
     if args.limit:
         splits = {k: v[: args.limit] for k, v in splits.items()}

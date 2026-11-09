@@ -262,3 +262,42 @@ def test_last_step_reads_the_resume_checkpoint(tmp_path):
     (tmp_path / "checkpoints" / "step=3000-val_wer=0.1800-last.ckpt").touch()
     (tmp_path / "checkpoints" / "step=1000-val_wer=0.2000.ckpt").touch()
     assert last_step(tmp_path) == 3000
+
+
+class _BlockingHub:
+    repo = "org/ckpts"
+
+    def __init__(self, fail=False):
+        import threading
+
+        self.release, self.fail, self.added = threading.Event(), fail, []
+
+    def add(self, local, name):
+        self.release.wait(5)
+        if self.fail:
+            raise RuntimeError("hub down")
+        assert Path(local).exists()
+        self.added.append(name)
+        return True
+
+
+def test_hub_uploads_run_in_the_background_in_order(tmp_path):
+    hub = _BlockingHub()
+    io = train._hub_checkpoint_io(hub, tmp_path / "upload-tmp")
+    for step, wer in ((1000, 0.5), (2000, 0.4)):
+        io.save_checkpoint({"state_dict": {}, "global_step": step}, tmp_path / f"step={step}-val_wer={wer}.ckpt")
+    assert hub.added == [] and len(io.pending) == 2  # save returned while the upload waits
+    hub.release.set()
+    io.wait()
+    assert hub.added == ["step=1000-val_wer=0.5.ckpt", "step=2000-val_wer=0.4.ckpt"]
+    assert not list((tmp_path / "upload-tmp").iterdir())  # temp copies deleted after upload
+
+
+def test_a_failed_hub_upload_is_raised(tmp_path):
+    hub = _BlockingHub(fail=True)
+    hub.release.set()
+    io = train._hub_checkpoint_io(hub, tmp_path / "upload-tmp")
+    io.save_checkpoint({"state_dict": {}, "global_step": 1}, tmp_path / "step=1-val_wer=0.5.ckpt")
+    io.teardown()  # waits without raising
+    with pytest.raises(RuntimeError, match="hub down"):
+        io.wait()

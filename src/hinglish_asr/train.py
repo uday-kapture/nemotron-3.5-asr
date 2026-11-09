@@ -260,27 +260,65 @@ def _notify_callback(chat, name: str, stage: str, cfg: dict, check_loss_every: i
 
 
 def _hub_checkpoint_io(hub, tmp_dir: Path):
+    import shutil
+    from concurrent import futures
+    from concurrent.futures import ThreadPoolExecutor
+
     import torch
     from lightning.pytorch.plugins.io import TorchCheckpointIO
 
     from .hub import VAL_WER
 
     class HubCheckpointIO(TorchCheckpointIO):
-        """Top-k checkpoints go to the hub as weights only; everything else is saved as usual."""
+        """Top-k checkpoints go to the hub as weights only; everything else is saved as usual.
+
+        Uploads (2.5 GB, minutes each) run on one background thread, in order,
+        so training goes on meanwhile; `hub.add` ranks against the hub at upload
+        time, so a queued checkpoint that has fallen out of the top k is skipped.
+        `wait` re-raises a failed upload.
+        """
+
+        def __init__(self):
+            super().__init__()
+            self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hub-upload")
+            self.pending = []
+            # Left by a process that was killed mid-queue; those checkpoints are lost.
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
         def save_checkpoint(self, checkpoint, path, storage_options=None):
             path = Path(path)
             if path.stem.endswith("-last") or not VAL_WER.search(path.stem):
                 return super().save_checkpoint(checkpoint, path, storage_options)
+            self._raise_failed()
             tmp_dir.mkdir(parents=True, exist_ok=True)
-            tmp = tmp_dir / path.name
+            tmp = tmp_dir / f"{time.time_ns()}-{path.name}"  # the same name can be saved again after a resume
             torch.save({"state_dict": checkpoint["state_dict"], "global_step": checkpoint.get("global_step")}, tmp)
+            self.pending.append(self.pool.submit(self._upload, tmp, path.name))
+
+        def _upload(self, tmp: Path, name: str):
             try:
-                uploaded = hub.add(tmp, path.name)
+                uploaded = hub.add(tmp, name)
             finally:
                 tmp.unlink(missing_ok=True)
-            print(f"{path.name}: {'uploaded to ' + hub.repo if uploaded else 'not in the hub top-k, skipped'}",
+            print(f"{name}: {'uploaded to ' + hub.repo if uploaded else 'not in the hub top-k, skipped'}",
                   file=sys.stderr)
+
+        def _raise_failed(self):
+            for f in [f for f in self.pending if f.done()]:
+                self.pending.remove(f)
+                f.result()
+
+        def wait(self):
+            """Block until every queued upload is done; re-raise the first failure."""
+            pending, self.pending = self.pending, []
+            for f in pending:
+                f.result()
+
+        def teardown(self):
+            # Lightning calls this when fit ends, also on an error: wait, but
+            # leave raising to `wait`, so an upload error never hides the original one.
+            futures.wait(self.pending)
+            super().teardown()
 
         def remove_checkpoint(self, path):
             # Lightning drops a checkpoint that fell out of its top-k; the hub
@@ -502,6 +540,8 @@ def _fit(cfg: dict, name: str, stage: str, parent_run_id: str | None, callbacks:
         # Recorded only once the params are in: a run that failed during setup starts a fresh MLflow run.
         id_file.write_text(logger.run_id + "\n")
     trainer.fit(model)
+    for plugin in plugins:
+        plugin.wait()  # the hub's top-k is the record best_val_wer reads
 
     ckpt = trainer.checkpoint_callback
     result = {

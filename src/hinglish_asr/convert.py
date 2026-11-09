@@ -76,7 +76,7 @@ from .bolai import COLUMNS, TARGET_LANG, RowFilter, customer_key, subset_of
 from .hub import ensure_private_repo
 from .scoring import script_of
 from .split import assign_split
-from .textnorm import normalize_target
+from .textnorm import normalize_target, spoken_target
 
 SAMPLE_RATE = 16000
 
@@ -114,6 +114,9 @@ def convert_file(job: _Job) -> dict:
     dropped, kept, seconds = Counter(), Counter(), Counter()
     train, held, ids = [], [], set()
     rows = text_changed = 0
+    spoken = cfg.get("target_style", "as_written") == "spoken"
+    empty_keep = (cfg.get("empty_targets") or {}).get("keep", 1.0)
+    digits_left: list[str] = []
     # Only these subsets (the calls) give val/test rows; the rest is training data only.
     heldout_subsets = cfg.get("heldout_subsets")
     holds_out = heldout_subsets is None or subset_of(job.path) in heldout_subsets
@@ -128,13 +131,24 @@ def convert_file(job: _Job) -> dict:
                 dropped["other_vendor"] += batch.num_rows - mine.num_rows
             for row in mine.to_pylist():
                 reason = flt.reason(row)
-                if reason:
+                empty = reason == "unintelligible" and flt.empty_target(row) and _sampled(
+                    str(row.get("chunk_id")), empty_keep, cfg["split_seed"])
+                if reason and not empty:
                     dropped[reason] += 1
                     continue
-                text = normalize_target(row["text"])
-                if not text:
-                    dropped["empty_text"] += 1
-                    continue
+                language = row.get("language_code")
+                if empty:  # a candidate "say nothing" target, for verify_empty
+                    text = ""
+                    language = language if language in flt.languages else flt.languages[0]
+                else:
+                    text = normalize_target(row["text"])
+                    if spoken:
+                        text = spoken_target(text, language)
+                        if any(ch.isdigit() for ch in text):
+                            digits_left.append(text)
+                    if not text:
+                        dropped["empty_text"] += 1
+                        continue
                 audio = (row.get("audio") or {}).get("bytes")
                 try:
                     info = sf.info(io.BytesIO(audio))
@@ -169,7 +183,7 @@ def convert_file(job: _Job) -> dict:
                     split = "client_test"
                 else:
                     split = assign_split(group, cfg["val_frac"], cfg["test_frac"], cfg["split_seed"])
-                lang = TARGET_LANG.get(row["language_code"], row["language_code"])
+                lang = TARGET_LANG.get(language, language)
                 conf = row.get("confidence")
                 entry = {
                     "duration": round(info.duration, 3),
@@ -178,15 +192,19 @@ def convert_file(job: _Job) -> dict:
                     "lang": lang,
                     "id": rid,
                     "group": group,
-                    "language": row["language_code"],
+                    "language": language,
+                    "provider": row.get("provider"),
                     "client_id": row.get("client_id"),
                     "channel": row.get("channel"),
                     "confidence": None if conf is None else round(conf, 4),
                 }
                 text_changed += text != row["text"]
-                kept[split] += 1
-                seconds[split] += info.duration
-                if split == "train":
+                bucket = "empty_candidates" if empty else split
+                kept[bucket] += 1
+                seconds[bucket] += info.duration
+                if empty:  # never in the tars or held-out manifests until verified
+                    held.append(("empty", {**entry, "for_split": split}, audio))
+                elif split == "train":
                     train.append((entry, audio))
                 else:
                     held.append((split, entry, audio))
@@ -225,6 +243,8 @@ def convert_file(job: _Job) -> dict:
         "hours": {s: v / 3600 for s, v in seconds.items()},
         "dropped": dict(dropped),
         "text_changed_by_normalization": text_changed,
+        "digits_left": len(digits_left),
+        "digits_left_examples": digits_left[:10],
         "bytes": size,
         "elapsed_s": round(time.perf_counter() - t0, 1),
     }
@@ -308,6 +328,13 @@ class ShardUploader:
         }
 
 
+def _sampled(key: str, share: float, seed: str) -> bool:
+    """A stable `share` of keys: the same rows on every rerun."""
+    if share >= 1:
+        return True
+    return int.from_bytes(hashlib.sha256(f"{seed}\0empty\0{key}".encode()).digest()[:8], "big") / 2**64 < share
+
+
 def pick_val_small(rows: list[dict], hours: float, seed: str) -> list[dict]:
     """Whole customers from `rows`, in a seeded order, until `hours` of audio."""
     by_group: dict[str, list[dict]] = defaultdict(list)
@@ -385,9 +412,11 @@ def finalize(out: str | Path, plan: dict, files: list[dict]) -> dict:
     missing = [f["index"] for f in files if f["index"] not in done]
 
     held: dict[str, list[dict]] = {"val": [], "test": [], "client_test": []}
+    empties: list[dict] = []
     for k in sorted(done):
         for row in _jsonl(out / "parts" / f"{k}.jsonl"):
-            held[row.pop("split")].append(row)
+            split = row.pop("split")
+            (empties if split == "empty" else held[split]).append(row)
     if not cfg.get("test_clients"):
         del held["client_test"]
     # Held-out audio is <split>/audio/<id>.flac: an id in two files is one file
@@ -400,14 +429,22 @@ def finalize(out: str | Path, plan: dict, files: list[dict]) -> dict:
         _write_jsonl(out / f"{split}_manifest.jsonl", rows)
     small = pick_val_small(held["val"], cfg["val_small_hours"], cfg["split_seed"])
     _write_jsonl(out / "val_small_manifest.jsonl", small)
+    seen_empty = Counter(r["id"] for r in empties)
+    empties = sorted((r for r in empties if seen_empty[r["id"]] == 1), key=lambda r: r["id"])
+    if cfg.get("empty_targets"):
+        _write_jsonl(out / "empty_candidates.jsonl", empties)
+    empty_summary = defaultdict(lambda: {"clips": 0, "hours": 0.0})
+    for r in empties:
+        empty_summary[r["for_split"]]["clips"] += 1
+        empty_summary[r["for_split"]]["hours"] += r["duration"] / 3600
 
     tallies = {s: _Tally() for s in ("train", *held)}
-    by_language, by_channel, confidence = Counter(), Counter(), []
+    by_language, by_channel, confidence = Counter(), Counter(), defaultdict(list)
     for k in sorted(done):
         for row in _jsonl(out / "train" / "sharded_manifests" / f"manifest_{k}.json"):
             tallies["train"].add(row)
             if row.get("confidence") is not None:
-                confidence.append(row["confidence"])
+                confidence[row.get("provider")].append(row["confidence"])
     for split, rows in held.items():
         for row in rows:
             tallies[split].add(row)
@@ -427,10 +464,15 @@ def finalize(out: str | Path, plan: dict, files: list[dict]) -> dict:
         "val_small": {"utterances": len(small), "hours": round(sum(r["duration"] for r in small) / 3600, 3)},
         "dropped": dict(dropped.most_common()),
         "heldout_id_clashes_dropped": clashes,
-        "train_confidence_quantiles": _quantiles(confidence),
+        "empty_candidates": {k: {"clips": v["clips"], "hours": round(v["hours"], 3)} for k, v in sorted(empty_summary.items())},
+        "train_confidence_quantiles": {str(p): _quantiles(v) for p, v in sorted(confidence.items(), key=str)},
         "heldout_hours_by_language": {k: round(v / 3600, 3) for k, v in by_language.items()},
         "heldout_hours_by_channel": {str(k): round(v / 3600, 3) for k, v in by_channel.items()},
         "text_changed_by_normalization": sum(d["text_changed_by_normalization"] for d in done.values()),
+        "digits_left": {
+            "rows": sum(d.get("digits_left", 0) for d in done.values()),
+            "examples": [e for d in done.values() for e in d.get("digits_left_examples", [])][:50],
+        },
         "downloaded_gb": round(sum(d["bytes"] for d in done.values()) / 1e9, 2),
     }
     (out / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -450,7 +492,7 @@ def convert(
     api=None,
 ) -> dict:
     out = Path(out)
-    for d in ("train/sharded_manifests", "val/audio", "test/audio", "client_test/audio", "parts", "done"):
+    for d in ("train/sharded_manifests", "val/audio", "test/audio", "client_test/audio", "empty/audio", "parts", "done"):
         (out / d).mkdir(parents=True, exist_ok=True)
     files = plan["files"][:limit_files] if limit_files else plan["files"]
     cache = str(cache or out / "cache")
