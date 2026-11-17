@@ -106,6 +106,22 @@ def test_cli_files_from_reuses_an_earlier_plans_files_in_order(tmp_path):
     assert plan["totals"]["hours"] == 2.0  # 1 h hi + 1 h of s1's 2 h outside its test split
 
 
+def test_cli_vendor_and_exclude_files_from_narrow_the_files(tmp_path):
+    shards = _stats()
+    for i in (1, 2, 3):
+        shards[f"data/combined/c{i}.parquet"]["vendors"] = {"deepgram_nova-3": {"rows": 1, "seconds": 600.0}}
+    stats = tmp_path / "stats"
+    stats.mkdir()
+    (stats / "host.json").write_text(json.dumps({"shards": shards}))
+    (tmp_path / "old.json").write_text(json.dumps({"files": [{"path": "data/combined/c2.parquet", "index": 0}]}))
+    cfg = {"dataset": "org/ds", "revision": "a" * 40, "subsets": {"combined": 1.0}, "languages": ["hi"],
+           "plan_seed": "s", "vendor": "deepgram_nova-3"}
+    (tmp_path / "cfg.yaml").write_text(yaml.safe_dump(cfg))
+    plan = main(["--config", str(tmp_path / "cfg.yaml"), "--out", str(tmp_path / "plan.json"),
+                 "--stats-dir", str(stats), "--no-sizes", "--exclude-files-from", str(tmp_path / "old.json")])
+    assert sorted(f["path"] for f in plan["files"]) == ["data/combined/c1.parquet", "data/combined/c3.parquet"]
+
+
 def test_cli_refuses_a_subset_without_a_share(tmp_path):
     cfg = {"dataset": "org/ds", "revision": "a" * 40, "subsets": {"combined": 1.0, "vaani": 0},
            "languages": ["hi"], "plan_seed": "s"}

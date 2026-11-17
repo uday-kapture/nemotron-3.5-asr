@@ -217,8 +217,9 @@ To prepare an earlier run's files under another recipe, pass
 `plan --files-from <old plan.json>`: it keeps that plan's files and order
 and ignores the shares. `configs/data/calls_deepgram_raw.yaml` does this for
 calls-v1's data (`/data-g/uday/calls/plan.json`) with numbers as written.
-`calls_numbers.yaml` (`numbers_only: true`) keeps only rows that hold a
-number, for mixing in.
+`calls_numbers.yaml` (`numbers_only: true`) keeps only Deepgram rows that hold
+a number, for mixing in; its `vendor` key plans only files with Deepgram rows,
+and `--exclude-files-from /data-g/uday/calls/plan.json` leaves out calls-v1's.
 
 Reruns skip finished files (`done/<k>.json`). A done file records the
 config's hash and the file's path, so after changing the config (and rerunning

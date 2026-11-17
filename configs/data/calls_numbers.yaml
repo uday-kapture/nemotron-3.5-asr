@@ -1,33 +1,33 @@
-# Number-heavy call rows, mixed into calls_deepgram_raw.yaml's data: every
-# vendor, calls_spoken.yaml's confidence gates, only the call subsets and only
-# rows that hold a number (bolai.RowFilter.numbers_only).
+# Number-heavy Deepgram call rows, mixed into calls_deepgram_raw.yaml's data
+# (calls-v1's files) in the same label style: Deepgram only, hi only, numbers
+# as written, and only rows that hold a number (bolai.RowFilter.numbers_only).
+# Plan it without calls-v1's files, so no row is in both:
+#   plan --config configs/data/calls_numbers.yaml --exclude-files-from /data-g/uday/calls/plan.json
 #
-# plan_seed differs from the other configs', so mostly other files come first.
 # split_seed is calls-v1, as in every calls config, so customers held out there
 # stay out of training here, and this val/test are number rows from those customers.
-# max_hours is planned before the number filter: run convert with
-# --limit-files 3 and compare report.json's dropped.no_number to the kept rows.
 
 dataset: kapturecx/bolAIndia
 revision: 3e812ecb20f11e074f5d7116a44e752b373cde5e
 
-subsets:
-  combined: 0.97
-  inhouse-asr-1: 0.03
-heldout_subsets: [combined, inhouse-asr-1]
-max_hours: 2000
+# inhouse-asr-1 is AssemblyAI; inhouse-asr-2's few files are all in calls-v1.
+subsets: {combined: 1.0}
+heldout_subsets: [combined]
+vendor: deepgram_nova-3          # plan: only files holding Deepgram rows (the stats' vendor key)
+# Every remaining Deepgram file (~1,500, a few hundred GB, each deleted after
+# converting). max_hours counts all vendors' hours in those files: to cap the
+# download, set it after a --limit-files 3 trial (plan.json totals: download_gb).
+max_hours: null
 plan_seed: numbers-v1
 
 # Rows
-providers: null
-languages: [hi, en]
+providers: [deepgram]
+languages: [hi]
 min_duration: 0.1
 max_duration: 20.0
-min_confidence:
-  assemblyai: 0.65
-  deepgram: 0.60
+min_confidence: {deepgram: 0.60} # numbers are what this data teaches: skip Deepgram's least sure rows
 channels: null
-target_style: as_written         # numbers as each vendor wrote them, like calls_deepgram_raw.yaml it is mixed with
+target_style: as_written         # numbers as Deepgram wrote them
 numbers_only: true
 
 # Splits

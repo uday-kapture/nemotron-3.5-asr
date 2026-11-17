@@ -108,6 +108,7 @@ def main(argv: list[str] | None = None) -> dict:
     p.add_argument("--stats-dir", help="use these stats/*.json instead of fetching them")
     p.add_argument("--no-sizes", action="store_true", help="skip listing the repo (file sizes, existence check)")
     p.add_argument("--files-from", help="an earlier plan.json: convert its files, in its order, instead of choosing by share")
+    p.add_argument("--exclude-files-from", nargs="+", default=[], help="earlier plan.json files whose files this plan leaves out")
     args = p.parse_args(argv)
 
     cfg = yaml.safe_load(Path(args.config).read_text())
@@ -125,6 +126,12 @@ def main(argv: list[str] | None = None) -> dict:
         for f in files if sizes is not None else ():
             f["bytes"] = sizes[f["path"]]
     else:
+        # `vendor` is the stats' key (deepgram_nova-3): only files holding its rows. Hours still count every vendor.
+        if cfg.get("vendor"):
+            stats = {path: s for path, s in stats.items() if s.get("vendors", {}).get(cfg["vendor"], {}).get("seconds")}
+        for old_plan in args.exclude_files_from:
+            seen = {f["path"] for f in json.loads(Path(old_plan).read_text())["files"]}
+            stats = {path: s for path, s in stats.items() if path not in seen}
         files = plan_files(
             stats,
             subsets=cfg["subsets"],
