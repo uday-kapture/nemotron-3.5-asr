@@ -51,6 +51,25 @@ def test_row_filter_confidence_and_channel_are_opt_in():
     assert RowFilter(channels=("right",)).reason(_row(channel="left")) == "channel"
 
 
+@pytest.mark.parametrize(
+    "text,kept",
+    [
+        ("मेरा नंबर 9876543210 है", True),
+        ("दो हज़ार रुपये भेज दो", True),
+        ("नौ आठ सात छह पांच चार", True),  # digit by digit
+        ("एक बार बता दो", False),  # lone एक is "a/once"
+        ("दो तीन दिन लगेंगे", False),  # a range
+        ("मेरा order cancel करो", False),
+    ],
+)
+def test_numbers_only_keeps_rows_with_a_number(text, kept):
+    assert RowFilter(numbers_only=True).reason(_row(text=text)) == (None if kept else "no_number")
+    assert RowFilter().reason(_row(text=text)) is None  # off by default
+    assert RowFilter.from_config({
+        "languages": ["hi"], "min_duration": 0.1, "max_duration": 20.0, "min_confidence": 0.0, "numbers_only": True,
+    }).numbers_only
+
+
 def test_customer_key_follows_call_direction():
     base = {"to_phone_hash": "T", "from_phone_hash": "F", "call_key": "C"}
     assert customer_key({**base, "call_direction": "Outbound"}) == "phone:T"

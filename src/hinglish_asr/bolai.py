@@ -13,6 +13,9 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .itn import numbers_to_digits
+from .textnorm import normalize_target
+
 # source_collection values that mark someone else's held-out data.
 TEST_LIKE_COLLECTIONS = frozenset({"valid", "validation", "dev", "test", "eval", "benchmark"})
 
@@ -96,6 +99,9 @@ class RowFilter:
     # Empty clips (no transcript, or is_unintelligible) become empty-target
     # candidates for `verify_empty` instead of being dropped.
     empty_targets: bool = False
+    # Keep only rows that hold a number: digits, or number words itn reads as one
+    # (not a lone एक/दो or a range like दो तीन). For a number-heavy continued run.
+    numbers_only: bool = False
 
     @classmethod
     def from_config(cls, cfg: dict) -> RowFilter:
@@ -108,6 +114,7 @@ class RowFilter:
             min_confidence=cfg["min_confidence"],
             channels=tuple(channels) if channels else None,
             empty_targets=bool(cfg.get("empty_targets")),
+            numbers_only=bool(cfg.get("numbers_only")),
         )
 
     def confidence_floor(self, provider: str | None) -> float:
@@ -161,4 +168,6 @@ class RowFilter:
         conf = row.get("confidence")
         if conf is not None and conf < self.confidence_floor(row.get("provider")):
             return "low_confidence"
+        if self.numbers_only and not any(ch.isdigit() for ch in numbers_to_digits(normalize_target(row["text"]))):
+            return "no_number"
         return None

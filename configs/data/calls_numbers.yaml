@@ -1,0 +1,38 @@
+# Number-heavy call rows for continued training from a chosen checkpoint:
+# calls_spoken.yaml's recipe (confidence gates, spoken targets), with only the
+# call subsets and only rows that hold a number (bolai.RowFilter.numbers_only).
+#
+# plan_seed differs from calls_spoken's, so mostly other files come first.
+# split_seed is the same, so the customers in calls-spoken's val/test stay out
+# of training here, and this run's val/test are number rows from those customers.
+# max_hours is planned before the number filter: run convert with
+# --limit-files 3 and compare report.json's dropped.no_number to the kept rows.
+
+dataset: kapturecx/bolAIndia
+revision: 3e812ecb20f11e074f5d7116a44e752b373cde5e
+
+subsets:
+  combined: 0.97
+  inhouse-asr-1: 0.03
+heldout_subsets: [combined, inhouse-asr-1]
+max_hours: 2000
+plan_seed: numbers-v1
+
+# Rows
+providers: null
+languages: [hi, en]
+min_duration: 0.1
+max_duration: 20.0
+min_confidence:
+  assemblyai: 0.65
+  deepgram: 0.60
+channels: null
+target_style: spoken             # must match the checkpoint's training targets (calls_mix.yaml: drop this line)
+numbers_only: true
+
+# Splits
+val_frac: 0.01
+test_frac: 0.01
+split_seed: calls-v1
+val_small_hours: 3.0
+test_clients: []
