@@ -1,0 +1,29 @@
+# calls-v1's data with numbers as Deepgram wrote them. calls-v1 trained on the
+# retired calls_deepgram.yaml (Deepgram rows, hi only, no confidence gate), which
+# also rewrote number words as digits (numbers_to_digits). This keeps the rest.
+# Same files, in the same order:
+#   plan --config configs/data/calls_deepgram_raw.yaml --files-from /data-g/uday/calls/plan.json
+# and the same split_seed, so val/test hold the same customers as calls-v1's.
+
+dataset: kapturecx/bolAIndia
+revision: 3e812ecb20f11e074f5d7116a44e752b373cde5e
+
+# --files-from picks the files; these only list the repo for file sizes.
+subsets: {combined: 1.0, inhouse-asr-2: 1.0}
+heldout_subsets: [combined, inhouse-asr-2]
+
+# Rows
+providers: [deepgram]
+languages: [hi]
+min_duration: 0.1
+max_duration: 20.0
+min_confidence: 0.0
+channels: null
+target_style: as_written         # numbers stay as Deepgram wrote them
+
+# Splits
+val_frac: 0.01
+test_frac: 0.01
+split_seed: calls-v1
+val_small_hours: 3.0
+test_clients: []

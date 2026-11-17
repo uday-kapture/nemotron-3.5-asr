@@ -89,6 +89,23 @@ def test_cli_embeds_config(tmp_path):
     assert saved["totals"]["hours_by_subset"] == {"combined": 15.0, "spring-inx": 4.0}
 
 
+def test_cli_files_from_reuses_an_earlier_plans_files_in_order(tmp_path):
+    stats = tmp_path / "stats"
+    stats.mkdir()
+    (stats / "host.json").write_text(json.dumps({"shards": _stats()}))
+    # An old-style plan entry (vendor_hours, no subset): only path and index are read.
+    old = {"files": [{"path": "data/combined/c7.parquet", "vendor_hours": 0.3, "index": 0},
+                     {"path": "data/spring-inx/s1.parquet", "vendor_hours": 0.1, "index": 1}]}
+    (tmp_path / "old.json").write_text(json.dumps(old))
+    cfg = {"dataset": "org/ds", "revision": "a" * 40, "subsets": {"combined": 1.0}, "languages": ["hi"]}
+    (tmp_path / "cfg.yaml").write_text(yaml.safe_dump(cfg))
+    plan = main(["--config", str(tmp_path / "cfg.yaml"), "--out", str(tmp_path / "plan.json"),
+                 "--stats-dir", str(stats), "--no-sizes", "--files-from", str(tmp_path / "old.json")])
+    assert [(f["path"], f["index"], f["subset"]) for f in plan["files"]] == [
+        ("data/combined/c7.parquet", 0, "combined"), ("data/spring-inx/s1.parquet", 1, "spring-inx")]
+    assert plan["totals"]["hours"] == 2.0  # 1 h hi + 1 h of s1's 2 h outside its test split
+
+
 def test_cli_refuses_a_subset_without_a_share(tmp_path):
     cfg = {"dataset": "org/ds", "revision": "a" * 40, "subsets": {"combined": 1.0, "vaani": 0},
            "languages": ["hi"], "plan_seed": "s"}

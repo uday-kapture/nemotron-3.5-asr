@@ -1,10 +1,10 @@
-# Number-heavy call rows for continued training from a chosen checkpoint:
-# calls_spoken.yaml's recipe (confidence gates, spoken targets), with only the
-# call subsets and only rows that hold a number (bolai.RowFilter.numbers_only).
+# Number-heavy call rows, mixed into calls_deepgram_raw.yaml's data: every
+# vendor, calls_spoken.yaml's confidence gates, only the call subsets and only
+# rows that hold a number (bolai.RowFilter.numbers_only).
 #
-# plan_seed differs from calls_spoken's, so mostly other files come first.
-# split_seed is the same, so the customers in calls-spoken's val/test stay out
-# of training here, and this run's val/test are number rows from those customers.
+# plan_seed differs from the other configs', so mostly other files come first.
+# split_seed is calls-v1, as in every calls config, so customers held out there
+# stay out of training here, and this val/test are number rows from those customers.
 # max_hours is planned before the number filter: run convert with
 # --limit-files 3 and compare report.json's dropped.no_number to the kept rows.
 
@@ -27,7 +27,7 @@ min_confidence:
   assemblyai: 0.65
   deepgram: 0.60
 channels: null
-target_style: spoken             # must match the checkpoint's training targets (calls_mix.yaml: drop this line)
+target_style: as_written         # numbers as each vendor wrote them, like calls_deepgram_raw.yaml it is mixed with
 numbers_only: true
 
 # Splits

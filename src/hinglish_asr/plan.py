@@ -107,6 +107,7 @@ def main(argv: list[str] | None = None) -> dict:
     p.add_argument("--out", required=True)
     p.add_argument("--stats-dir", help="use these stats/*.json instead of fetching them")
     p.add_argument("--no-sizes", action="store_true", help="skip listing the repo (file sizes, existence check)")
+    p.add_argument("--files-from", help="an earlier plan.json: convert its files, in its order, instead of choosing by share")
     args = p.parse_args(argv)
 
     cfg = yaml.safe_load(Path(args.config).read_text())
@@ -115,14 +116,23 @@ def main(argv: list[str] | None = None) -> dict:
     out = Path(args.out)
     stats_dir = args.stats_dir or fetch_stats(cfg["dataset"], cfg["revision"], out.parent / "bolai-meta")
     sizes = None if args.no_sizes else repo_sizes(cfg["dataset"], cfg["revision"], list(cfg["subsets"]))
-    files = plan_files(
-        load_stats(stats_dir),
-        subsets=cfg["subsets"],
-        languages=cfg["languages"],
-        seed=cfg["plan_seed"],
-        max_hours=cfg.get("max_hours"),
-        sizes=sizes,
-    )
+    stats = load_stats(stats_dir)
+    if args.files_from:
+        # The same files as an earlier run (its data under another recipe); hours re-estimated for these languages.
+        old = json.loads(Path(args.files_from).read_text())["files"]
+        files = [{"path": f["path"], "subset": subset_of(f["path"]), "hours": usable_hours(stats[f["path"]], cfg["languages"]),
+                  "file_hours": stats[f["path"]]["seconds"] / 3600, "index": f["index"]} for f in old]
+        for f in files if sizes is not None else ():
+            f["bytes"] = sizes[f["path"]]
+    else:
+        files = plan_files(
+            stats,
+            subsets=cfg["subsets"],
+            languages=cfg["languages"],
+            seed=cfg["plan_seed"],
+            max_hours=cfg.get("max_hours"),
+            sizes=sizes,
+        )
     by_subset: dict[str, float] = {}
     for f in files:
         by_subset[f["subset"]] = by_subset.get(f["subset"], 0.0) + f["hours"]
