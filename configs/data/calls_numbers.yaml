@@ -14,10 +14,11 @@ revision: 3e812ecb20f11e074f5d7116a44e752b373cde5e
 subsets: {combined: 1.0}
 heldout_subsets: [combined]
 vendor: deepgram_nova-3          # plan: only files holding Deepgram rows (the stats' vendor key)
-# Every remaining Deepgram file (~1,500, a few hundred GB, each deleted after
-# converting). max_hours counts all vendors' hours in those files: to cap the
-# download, set it after a --limit-files 3 trial (plan.json totals: download_gb).
-max_hours: null
+# max_hours counts all vendors' hours in those files. The whole pool is 1,592
+# files, 6,843 h, 387 GB; a 3-file trial kept ~3.8% of planned hours as number
+# rows (13% of usable Deepgram rows hold a number). 3400 = about half: ~800 files,
+# ~195 GB, ~130 h of number rows. Raise it and rerun plan + convert on the same --out to grow.
+max_hours: 3400
 plan_seed: numbers-v1
 
 # Rows
