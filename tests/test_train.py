@@ -31,7 +31,7 @@ TRAINED = [[56, 3], [56, 0], [56, 6], [56, 13]]  # the .nemo's att_context_size 
 
 
 def test_repo_config_resolves_for_every_arm():
-    for arm in ("noam", "cosine"):
+    for arm in ("noam", "cosine", "lora-lr5e-4", "lora-lr1e-3"):
         cfg = load_config(CONFIG, arm)
         assert cfg["arm"] == arm
         assert cfg["model"]["att_context_size"] == [56, 0]
@@ -291,6 +291,20 @@ def test_hub_uploads_run_in_the_background_in_order(tmp_path):
     io.wait()
     assert hub.added == ["step=1000-val_wer=0.5.ckpt", "step=2000-val_wer=0.4.ckpt"]
     assert not list((tmp_path / "upload-tmp").iterdir())  # temp copies deleted after upload
+
+
+def test_hub_checkpoints_of_a_lora_run_are_merged_into_plain_weights(tmp_path):
+    torch = pytest.importorskip("torch")
+    hub = _BlockingHub()
+    hub.release.set()
+    io = train._hub_checkpoint_io(hub, tmp_path / "upload-tmp")
+    sd = {"l.weight": torch.zeros(2, 2), "l.lora_A": torch.ones(1, 2), "l.lora_B": torch.ones(2, 1),
+          "l.lora_scale": torch.tensor(0.5)}
+    saved = {}
+    hub.add = lambda local, name: saved.update(torch.load(local, weights_only=False)["state_dict"]) or True
+    io.save_checkpoint({"state_dict": sd, "global_step": 1}, tmp_path / "step=1-val_wer=0.5.ckpt")
+    io.wait()
+    assert saved.keys() == {"l.weight"} and torch.equal(saved["l.weight"], torch.full((2, 2), 0.5))
 
 
 def test_a_failed_hub_upload_is_raised(tmp_path):

@@ -276,6 +276,7 @@ def main(argv: list[str] | None = None) -> dict:
     import torch
 
     from .baseline import latency_ms, load_model, transcribe_offline, transcribe_streaming
+    from .lora import merge
     from .scoring import load_equivalents
 
     run_dir = Path(args.run)
@@ -336,7 +337,8 @@ def main(argv: list[str] | None = None) -> dict:
                 return torch.load(path, map_location="cpu", weights_only=False)["state_dict"]
             finally:
                 path.unlink(missing_ok=True)
-        return torch.load(ref, map_location="cpu", weights_only=False)["state_dict"]
+        # A LoRA run's local checkpoints (-last, or top-k without a hub) keep the LoRA form.
+        return merge(torch.load(ref, map_location="cpu", weights_only=False)["state_dict"])
 
     def load(source: tuple) -> dict:
         sd = state_dict_of(source)

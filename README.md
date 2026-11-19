@@ -335,6 +335,44 @@ here measures agreement with them, not accuracy. Vendors write English words in
 different scripts, so plain WER counts `mobile`/`मोबाइल` as an error; lenient
 WER does not.
 
+**Forgetting less: blends and LoRA.** A full fine-tune on calls alone updates
+every weight toward the calls and loses some of what the base model knew
+(general Hindi speech scores lower in the arena). Two ways to keep more of it:
+
+- **Blend** (`blend.py`, no training): each weight becomes
+  `alpha * fine-tuned + (1 - alpha) * base`. Score each blend on the calls test
+  sets and on general speech, and keep the alpha that trades best.
+
+  ```bash
+  uv run --extra nemo python -m hinglish_asr.blend \
+      --tuned runs/calls-raw-numbers-v1/benchmark/winner.nemo \
+      --out-dir runs/calls-raw-numbers-v1/blends --alphas 0.3 0.5 0.7     # blend-0.3.nemo ...
+  for m in models/base/nemotron-3.5-asr-streaming-0.6b.nemo runs/calls-raw-numbers-v1/blends/*.nemo \
+           runs/calls-raw-numbers-v1/benchmark/winner.nemo; do
+    for set in calls-raw calls-numbers-dg; do
+      uv run --extra nemo python -m hinglish_asr.baseline --model $m --manifest /data-g/uday/$set/test_manifest.jsonl \
+          --out reports/blends/$(basename $m .nemo)/$set --modes offline --target-langs hi-IN \
+          --att-context-sizes 56,0 --batch-size 64
+    done
+  done
+  ```
+
+  For general speech, serve each blend as its own arena gladiator and run one
+  tournament with all of them, so they get the same clips. Compare OiWER: the
+  arena's WER and CER also count spelling style (nukta, script, number form).
+- **LoRA** (`lora.py`, the `lora-*` arms): the base weights stay frozen
+  (BatchNorm statistics too) and only a rank-32 change to the encoder's
+  attention and feed-forward layers and the joint's input projections trains.
+  The hub checkpoints and `winner.nemo` have the LoRA merged in: plain models,
+  served and streamed like any other. Sweep both arms on the run's data, then
+  run the winner, with the same `--set` values as the full fine-tune it is
+  compared with:
+
+  ```bash
+  uv run python -m hinglish_asr.train sweep --arms lora-lr5e-4 lora-lr1e-3 --set ...
+  uv run python -m hinglish_asr.train run --arm <sweep winner> --name calls-raw-numbers-lora-v1 --retries 2 --set ...
+  ```
+
 **MLflow** (`tracking.py`). Every stage refuses to run without
 `MLFLOW_TRACKING_URI`, because the fallback would be a local store nobody
 sees. Training logs through Lightning's MLFlowLogger, as NeMo's exp_manager

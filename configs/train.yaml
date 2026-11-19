@@ -54,6 +54,11 @@ model:
     name: adamw
     betas: [0.9, 0.98]
     weight_decay: 1.0e-3
+  # null = update every weight. {rank, alpha, layers}: train only a LoRA on the
+  # chosen linear layers, everything else frozen (`lora`); layers null = the
+  # encoder's attention and feed-forward layers and the joint's input projections.
+  # The lora-* arms set it.
+  lora: null
 
 trainer:
   devices: 1
@@ -104,4 +109,17 @@ arms:
     model:
       optim:
         lr: 1.0e-4
+        sched: {name: CosineAnnealing, warmup_ratio: 0.02, min_lr: 1.0e-6}
+  # LoRA trains far fewer weights and needs a higher LR than a full fine-tune: sweep both.
+  lora-lr5e-4:
+    model:
+      lora: {rank: 32, alpha: 64, layers: null}
+      optim:
+        lr: 5.0e-4
+        sched: {name: CosineAnnealing, warmup_ratio: 0.02, min_lr: 1.0e-6}
+  lora-lr1e-3:
+    model:
+      lora: {rank: 32, alpha: 64, layers: null}
+      optim:
+        lr: 1.0e-3
         sched: {name: CosineAnnealing, warmup_ratio: 0.02, min_lr: 1.0e-6}

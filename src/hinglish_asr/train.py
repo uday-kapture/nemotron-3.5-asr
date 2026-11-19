@@ -268,6 +268,7 @@ def _hub_checkpoint_io(hub, tmp_dir: Path):
     from lightning.pytorch.plugins.io import TorchCheckpointIO
 
     from .hub import VAL_WER
+    from .lora import merge
 
     class HubCheckpointIO(TorchCheckpointIO):
         """Top-k checkpoints go to the hub as weights only; everything else is saved as usual.
@@ -292,7 +293,8 @@ def _hub_checkpoint_io(hub, tmp_dir: Path):
             self._raise_failed()
             tmp_dir.mkdir(parents=True, exist_ok=True)
             tmp = tmp_dir / f"{time.time_ns()}-{path.name}"  # the same name can be saved again after a resume
-            torch.save({"state_dict": checkpoint["state_dict"], "global_step": checkpoint.get("global_step")}, tmp)
+            # Merged: a hub checkpoint is a plain model whether or not the run trained a LoRA.
+            torch.save({"state_dict": merge(checkpoint["state_dict"]), "global_step": checkpoint.get("global_step")}, tmp)
             self.pending.append(self.pool.submit(self._upload, tmp, path.name))
 
         def _upload(self, tmp: Path, name: str):
@@ -433,6 +435,12 @@ def _setup_model(model, cfg: dict) -> dict:
         model.cfg.validation_ds = val_ds
     model.setup_training_data(OmegaConf.create(train_ds))
     model.setup_multiple_validation_data(OmegaConf.create(val_ds))
+    if m.get("lora"):  # before the optimizer, which takes the LoRA parameters
+        from . import lora
+
+        lc = m["lora"]
+        applied["lora_layers"] = len(lora.add(model, lc.get("layers") or lora.DEFAULT_LAYERS, lc["rank"], lc["alpha"]))
+        applied["trainable_params"] = sum(p.numel() for p in model.parameters() if p.requires_grad)
     optim = dict(m["optim"])
     schedule_steps = optim.pop("schedule_steps", None)
     setup_optimization(model, resolve_optim(optim), schedule_steps)
@@ -493,6 +501,8 @@ def _fit(cfg: dict, name: str, stage: str, parent_run_id: str | None, callbacks:
     mlflow_run_id = id_file.read_text().strip() if id_file.exists() and resumable else None
     throughput = _throughput_callback(run_dir / "throughput.json")
     ckpt_params, plugins = dict(cfg["checkpoint"]), []
+    if cfg["model"].get("lora"):  # NeMo's .nemo would hold the LoRA layers; benchmark writes the merged winner.nemo
+        ckpt_params.update(save_best_model=False, save_nemo_on_train_end=False)
     hub_repo = cfg.get("checkpoint_hub_repo")
     if hub_repo and stage != "pilot":
         from .hub import HubCheckpoints
